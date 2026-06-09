@@ -1,4 +1,4 @@
-# API Interceptor —— 修改请求与响应数据的浏览器插件
+# API MockFlow —— 修改请求与响应数据的浏览器插件
 
 > 功能类似 Requestly，支持拦截并修改 API 请求参数和响应数据，规则可保存、启用/关停。
 
