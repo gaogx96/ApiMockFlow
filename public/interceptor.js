@@ -15,12 +15,12 @@
   function safeRe(p, f) { try { return new RegExp(p, f); } catch (_) { return null; } }
   function hdrRec(h) { var r = {}; h.forEach(function (v, k) { r[k] = v; }); return r; }
   function parseHdr(raw) { var r = {}; raw.trim().split(/[\r\n]+/).forEach(function (line) { var idx = line.indexOf(': '); if (idx > 0) r[line.slice(0, idx)] = line.slice(idx + 2); }); return r; }
-  var REQ = ['modifyRequestUrl','modifyRequestHeader','modifyRequestBody','redirect','cancel'];
+  var REQ = ['modifyRequestUrl','modifyRequestHeader','modifyRequestBody','redirect','cancel','delay'];
   var RESP = ['modifyResponseHeader','modifyResponseBody','modifyStatusCode'];
 
-  function applyReq(url, hdrs, body, actions) { var u = url, b = body, h = {}; for (var k in hdrs) h[k] = hdrs[k]; var cancelled = false; for (var i = 0; i < actions.length; i++) { var a = actions[i]; switch (a.type) { case 'modifyRequestUrl': if (a.operate === 'replace') { var re = safeRe(a.key, 'g'); if (re) u = u.replace(re, a.value); } else if (a.operate === 'set') u = a.value; else if (a.operate === 'remove') { var re2 = safeRe('[?&]' + a.key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '=[^&]*', 'g'); if (re2) u = u.replace(re2, ''); } break; case 'modifyRequestHeader': if (a.operate === 'set') h[a.key] = a.value; else if (a.operate === 'append') h[a.key] = (h[a.key] || '') + a.value; else if (a.operate === 'remove') { var re3 = safeRe(a.key, 'i'); if (re3) { var ks = Object.keys(h); for (var j = 0; j < ks.length; j++) { if (re3.test(ks[j])) delete h[ks[j]]; } } } else if (a.operate === 'replace') { var re4 = safeRe(a.key, 'i'); if (re4) { var ks2 = Object.keys(h); for (var j2 = 0; j2 < ks2.length; j2++) { if (re4.test(ks2[j2])) h[ks2[j2]] = h[ks2[j2]].replace(safeRe(a.value, 'g') || a.value, ''); } } } break; case 'modifyRequestBody': if (b !== undefined) { if (a.operate === 'replace') { var re5 = safeRe(a.key, 'g'); if (re5) b = b.replace(re5, a.value); } else if (a.operate === 'set') b = a.value; } break; case 'redirect': if (a.operate === 'set') u = a.value; break; case 'cancel': cancelled = true; break; } } return { url: u, headers: h, body: b, cancelled: cancelled }; }
+  function applyReq(url, hdrs, body, actions) { var u = url, b = body, h = {}; for (var k in hdrs) h[k] = hdrs[k]; var cancelled = false; var delayMs = 0; for (var i = 0; i < actions.length; i++) { var a = actions[i]; switch (a.type) { case 'modifyRequestUrl': if (a.operate === 'replace') { var re = safeRe(a.key, 'g'); if (re) u = u.replace(re, a.value); } else if (a.operate === 'set') u = a.value; else if (a.operate === 'remove') { var re2 = safeRe('[?&]' + a.key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '=[^&]*', 'g'); if (re2) u = u.replace(re2, ''); } break; case 'modifyRequestHeader': if (a.operate === 'set') h[a.key] = a.value; else if (a.operate === 'append') h[a.key] = (h[a.key] ? h[a.key] + ', ' : '') + a.value; else if (a.operate === 'remove') { var re3 = safeRe(a.key, 'i'); if (re3) { var ks = Object.keys(h); for (var j = 0; j < ks.length; j++) { if (re3.test(ks[j])) delete h[ks[j]]; } } } else if (a.operate === 'replace') { var re4 = safeRe(a.key, 'i'); if (re4) { var ks2 = Object.keys(h); for (var j2 = 0; j2 < ks2.length; j2++) { if (re4.test(ks2[j2])) h[ks2[j2]] = a.value; } } } break; case 'modifyRequestBody': if (b !== undefined) { if (a.operate === 'replace') { var re5 = safeRe(a.key, 'g'); if (re5) b = b.replace(re5, a.value); } else if (a.operate === 'set') b = a.value; } break; case 'redirect': if (a.operate === 'set') u = a.value; break; case 'cancel': cancelled = true; break; case 'delay': delayMs = Math.max(delayMs, parseInt(a.value) || 0); break; } } return { url: u, headers: h, body: b, cancelled: cancelled, delayMs: delayMs }; }
 
-  function applyResp(status, statusText, hdrs, body, actions) { var s = status, st = statusText, b = body, h = {}; for (var k in hdrs) h[k] = hdrs[k]; var bodyChanged = false; for (var i = 0; i < actions.length; i++) { var a = actions[i]; switch (a.type) { case 'modifyResponseHeader': if (a.operate === 'set') h[a.key] = a.value; else if (a.operate === 'append') h[a.key] = (h[a.key] || '') + a.value; else if (a.operate === 'remove') { var re = safeRe(a.key, 'i'); if (re) { var ks = Object.keys(h); for (var j = 0; j < ks.length; j++) { if (re.test(ks[j])) delete h[ks[j]]; } } } else if (a.operate === 'replace') { var re2 = safeRe(a.key, 'i'); if (re2) { var ks2 = Object.keys(h); for (var j2 = 0; j2 < ks2.length; j2++) { if (re2.test(ks2[j2])) h[ks2[j2]] = h[ks2[j2]].replace(safeRe(a.value, 'g') || a.value, ''); } } } break; case 'modifyResponseBody': if (a.operate === 'replace') { var re3 = safeRe(a.key, 'g'); if (re3) b = b.replace(re3, a.value); bodyChanged = true; } else if (a.operate === 'set') { b = a.value; bodyChanged = true; } break; case 'modifyStatusCode': if (a.operate === 'set') { var c = parseInt(a.value); if (!isNaN(c) && c >= 100 && c <= 599) { s = c; st = (c >= 200 && c < 300) ? 'OK' : ''; } } break; } } if (bodyChanged && h['Content-Length']) h['Content-Length'] = String(b.length); return { status: s, statusText: st, headers: h, body: b }; }
+  function applyResp(status, statusText, hdrs, body, actions) { var s = status, st = statusText, b = body, h = {}; for (var k in hdrs) h[k] = hdrs[k]; var bodyChanged = false; for (var i = 0; i < actions.length; i++) { var a = actions[i]; switch (a.type) { case 'modifyResponseHeader': if (a.operate === 'set') h[a.key] = a.value; else if (a.operate === 'append') h[a.key] = (h[a.key] ? h[a.key] + ', ' : '') + a.value; else if (a.operate === 'remove') { var re = safeRe(a.key, 'i'); if (re) { var ks = Object.keys(h); for (var j = 0; j < ks.length; j++) { if (re.test(ks[j])) delete h[ks[j]]; } } } else if (a.operate === 'replace') { var re2 = safeRe(a.key, 'i'); if (re2) { var ks2 = Object.keys(h); for (var j2 = 0; j2 < ks2.length; j2++) { if (re2.test(ks2[j2])) h[ks2[j2]] = a.value; } } } break; case 'modifyResponseBody': if (a.operate === 'replace') { var re3 = safeRe(a.key, 'g'); if (re3) b = b.replace(re3, a.value); bodyChanged = true; } else if (a.operate === 'set') { b = a.value; bodyChanged = true; } break; case 'modifyStatusCode': if (a.operate === 'set') { var c = parseInt(a.value); if (!isNaN(c) && c >= 100 && c <= 599) { s = c; st = (c >= 200 && c < 300) ? 'OK' : ''; } } break; } } if (bodyChanged) { delete h['content-length']; delete h['content-encoding']; var ct = h['content-type']; if (ct && ct.indexOf('charset') === -1) h['content-type'] = ct + '; charset=utf-8'; } return { status: s, statusText: st, headers: h, body: b }; }
 
   // === LOCAL rule matching (same logic as background, no bridge) ===
   function matchUrl(ruleUrl, matchType, url) {
@@ -53,7 +53,7 @@
   }
 
   // === Intercepted fetch ===
-  function interceptedFetch(input, init) {
+  async function interceptedFetch(input, init) {
     _reqCount++;
     var url = typeof input === 'string' ? input : (input instanceof URL ? input.href : (input && input.url) || '');
     var method = (init && init.method) || (input && input.method) || 'GET';
@@ -72,10 +72,14 @@
       return new Response(null, { status: 403, statusText: 'Blocked' });
     }
 
+    // Delay simulation
+    if (rm.delayMs > 0) {
+      await new Promise(function (r) { setTimeout(r, rm.delayMs); });
+    }
+
     var ni = init ? Object.assign({}, init) : {};
     if (rm.url !== url) input = rm.url; ni.headers = rm.headers; if (rm.body !== undefined) ni.body = rm.body;
 
-    var self = this;
     return NATIVE_FETCH(input, ni).then(function (resp) {
       if (respA.length > 0) {
         return resp.text().then(function (rb) {
@@ -112,11 +116,21 @@
       var reqA = allA.filter(function (a) { return REQ.indexOf(a.type) >= 0; });
       var respA = allA.filter(function (a) { return RESP.indexOf(a.type) >= 0; });
       var rm = applyReq(ou, orh, ob, reqA);
-      if (rm.cancelled) { try{Object.defineProperty(self,'status',{value:403});Object.defineProperty(self,'statusText',{value:'Blocked'});Object.defineProperty(self,'responseText',{value:''});Object.defineProperty(self,'response',{value:''});Object.defineProperty(self,'readyState',{value:4});}catch(_){} setTimeout(function(){self.dispatchEvent(new Event('load'));},0); return; }
-      var hk = Object.keys(rm.headers); for (var i2 = 0; i2 < hk.length; i2++) { try { _XHR_setRH.call(self, hk[i2], rm.headers[hk[i2]]); } catch (_) {} }
-      if (rm.url !== ou) { var px = new NATIVE_XHR(); px.open(om, rm.url, true); var hk2 = Object.keys(rm.headers); for (var i3 = 0; i3 < hk2.length; i3++) { try { px.setRequestHeader(hk2[i3], rm.headers[hk2[i3]]); } catch (_) {} } px.onreadystatechange = function () { if (px.readyState === 4 && !self._xrm) { self._xrm = true; var rb = px.responseText || ''; var rh = parseHdr(px.getAllResponseHeaders()); if (respA.length > 0) { var rmod = applyResp(px.status, px.statusText, rh, rb, respA); try{Object.defineProperty(self,'status',{value:rmod.status});Object.defineProperty(self,'statusText',{value:rmod.statusText});Object.defineProperty(self,'responseText',{value:rmod.body});Object.defineProperty(self,'response',{value:rmod.body});self.getResponseHeader=function(n){for(var k2 in rmod.headers){if(k2.toLowerCase()===n.toLowerCase())return rmod.headers[k2];}return null;};self.getAllResponseHeaders=function(){return Object.keys(rmod.headers).map(function(k2){return k2+': '+rmod.headers[k2];}).join('\r\n');};}catch(_){} } try{Object.defineProperty(self,'readyState',{value:4});}catch(_){} self.dispatchEvent(new Event('readystatechange')); self.dispatchEvent(new Event('load')); if (px.status >= 400) self.dispatchEvent(new Event('error')); } }; px.send(rm.body !== undefined ? rm.body : body); return; }
-      if (respA.length > 0) { self.addEventListener('readystatechange', function h() { if (self.readyState === 4 && !self._xrm) { self._xrm = true; self.removeEventListener('readystatechange', h); var rb = self.responseText || ''; var rh = parseHdr(oGAH.call(self)); var os = self.status, ot = self.statusText; var rmod = applyResp(os, ot, rh, rb, respA); console.log('[ApiMockFlow] XHR Response modified:', om, ou, 'status', os, '→', rmod.status, 'bodyLen', rb.length, '→', rmod.body.length); try{Object.defineProperty(self,'status',{value:rmod.status});Object.defineProperty(self,'statusText',{value:rmod.statusText});Object.defineProperty(self,'responseText',{value:rmod.body});Object.defineProperty(self,'response',{value:rmod.body});self.getResponseHeader=function(n){for(var k2 in rmod.headers){if(k2.toLowerCase()===n.toLowerCase())return rmod.headers[k2];}return null;};self.getAllResponseHeaders=function(){return Object.keys(rmod.headers).map(function(k2){return k2+': '+rmod.headers[k2];}).join('\r\n');};}catch(_){} } }); return _XHR_send.call(self, rm.body !== undefined ? rm.body : body); }
-      return _XHR_send.call(self, rm.body !== undefined ? rm.body : body);
+
+      function doXHRSend() {
+        if (rm.cancelled) { try{Object.defineProperty(self,'status',{value:403});Object.defineProperty(self,'statusText',{value:'Blocked'});Object.defineProperty(self,'responseText',{value:''});Object.defineProperty(self,'response',{value:''});Object.defineProperty(self,'readyState',{value:4});}catch(_){} setTimeout(function(){self.dispatchEvent(new Event('load'));},0); return; }
+        var hk = Object.keys(rm.headers); for (var i2 = 0; i2 < hk.length; i2++) { try { _XHR_setRH.call(self, hk[i2], rm.headers[hk[i2]]); } catch (_) {} }
+        if (rm.url !== ou) { var px = new NATIVE_XHR(); px.open(om, rm.url, true); var hk2 = Object.keys(rm.headers); for (var i3 = 0; i3 < hk2.length; i3++) { try { px.setRequestHeader(hk2[i3], rm.headers[hk2[i3]]); } catch (_) {} } px.onreadystatechange = function () { if (px.readyState === 4 && !self._xrm) { self._xrm = true; var rb = px.responseText || ''; var rh = parseHdr(px.getAllResponseHeaders()); if (respA.length > 0) { var rmod = applyResp(px.status, px.statusText, rh, rb, respA); try{Object.defineProperty(self,'status',{value:rmod.status});Object.defineProperty(self,'statusText',{value:rmod.statusText});Object.defineProperty(self,'responseText',{value:rmod.body});Object.defineProperty(self,'response',{value:rmod.body});self.getResponseHeader=function(n){for(var k2 in rmod.headers){if(k2.toLowerCase()===n.toLowerCase())return rmod.headers[k2];}return null;};self.getAllResponseHeaders=function(){return Object.keys(rmod.headers).map(function(k2){return k2+': '+rmod.headers[k2];}).join('\r\n');};}catch(_){} } try{Object.defineProperty(self,'readyState',{value:4});}catch(_){} self.dispatchEvent(new Event('readystatechange')); self.dispatchEvent(new Event('load')); if (px.status >= 400) self.dispatchEvent(new Event('error')); } }; px.send(rm.body !== undefined ? rm.body : body); return; }
+        if (respA.length > 0) { self.addEventListener('readystatechange', function h() { if (self.readyState === 4 && !self._xrm) { self._xrm = true; self.removeEventListener('readystatechange', h); var rb = self.responseText || ''; var rh = parseHdr(oGAH.call(self)); var os = self.status, ot = self.statusText; var rmod = applyResp(os, ot, rh, rb, respA); console.log('[ApiMockFlow] XHR Response modified:', om, ou, 'status', os, '→', rmod.status, 'bodyLen', rb.length, '→', rmod.body.length); 
+try{Object.defineProperty(self,'status',{value:rmod.status});Object.defineProperty(self,'statusText',{value:rmod.statusText});Object.defineProperty(self,'responseText',{value:rmod.body});Object.defineProperty(self,'response',{value:rmod.body});self.getResponseHeader=function(n){for(var k2 in rmod.headers){if(k2.toLowerCase()===n.toLowerCase())return rmod.headers[k2];}return null;};self.getAllResponseHeaders=function(){return Object.keys(rmod.headers).map(function(k2){return k2+': '+rmod.headers[k2];}).join('\r\n');};}catch(_){} } }); return _XHR_send.call(self, rm.body !== undefined ? rm.body : body); }
+        return _XHR_send.call(self, rm.body !== undefined ? rm.body : body);
+      }
+
+      if (rm.delayMs > 0) {
+        setTimeout(doXHRSend, rm.delayMs);
+      } else {
+        doXHRSend();
+      }
     };
   }
 
@@ -154,7 +168,6 @@
         if (RULES[i].match && RULES[i].match.url) RULES[i].match.url = RULES[i].match.url.trim();
       }
       GROUPS = e.data.groups || [];
-      // console.log('[ApiMockFlow] Sync:', e.data.active ? 'ON' : 'OFF', 'rules:', RULES.length, 'groups:', GROUPS.length);
       setActive(e.data.active);
     }
   });

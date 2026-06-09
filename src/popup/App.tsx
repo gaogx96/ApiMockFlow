@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { BoltIcon, Cog6ToothIcon, BeakerIcon } from '@heroicons/react/24/outline';
+import { BoltIcon, Cog6ToothIcon, BeakerIcon, SunIcon, MoonIcon } from '@heroicons/react/24/outline';
 import { AppState, Rule } from '../shared/types';
 import RuleList from './pages/RuleList';
 import RuleEditor from './pages/RuleEditor';
@@ -15,6 +15,23 @@ export default function App() {
     groups: [{ id: 'default', name: '默认分组', enabled: true, color: '#1677ff' }],
   });
   const [editingRule, setEditingRule] = useState<Rule | null>(null);
+  const [dark, setDark] = useState(false);
+
+  // Load dark mode preference
+  useEffect(() => {
+    chrome.storage.local.get('theme', (res) => {
+      const isDark = res.theme === 'dark';
+      setDark(isDark);
+      if (isDark) document.documentElement.classList.add('dark');
+    });
+  }, []);
+
+  function toggleTheme() {
+    const next = !dark;
+    setDark(next);
+    document.documentElement.classList.toggle('dark', next);
+    chrome.storage.local.set({ theme: next ? 'dark' : 'light' });
+  }
 
   const refreshState = () => {
     chrome.runtime.sendMessage({ type: 'GET_STATE' }, (res) => {
@@ -49,9 +66,9 @@ export default function App() {
   return (
     <div className="flex h-full" style={{ height: '580px' }}>
       {/* Sidebar */}
-      <aside className="w-44 bg-gray-50 border-r border-gray-200 flex flex-col shrink-0">
+      <aside className="w-44 bg-gray-50 dark:bg-gray-800 border-r border-gray-200 dark:border-gray-700 flex flex-col shrink-0">
         {/* Logo area */}
-        <div className="px-3 py-3 border-b border-gray-200">
+        <div className="px-3 py-3 border-b border-gray-200 dark:border-gray-700">
           <div className="flex items-center gap-1.5">
             <BoltIcon className="w-4 h-4 text-primary-500" />
             <span className="text-sm font-bold text-gray-800 tracking-tight">ApiMockFlow</span>
@@ -90,13 +107,20 @@ export default function App() {
         </nav>
 
         {/* Footer */}
-        <div className="px-3 py-2 border-t border-gray-200 space-y-1">
+        <div className="px-3 py-2 border-t border-gray-200 dark:border-gray-700 space-y-1">
           <div className="text-xs text-gray-400">
             {state.groups.length} 个分组 · {ruleCount} 条规则
           </div>
           <div className="text-xs text-gray-400">
             全局: {state.globalEnabled ? 'ON' : 'OFF'}
           </div>
+          <button
+            className="flex items-center gap-1.5 text-xs text-gray-400 hover:text-gray-600 transition-colors"
+            onClick={toggleTheme}
+          >
+            {dark ? <SunIcon className="w-3.5 h-3.5" /> : <MoonIcon className="w-3.5 h-3.5" />}
+            {dark ? '亮色' : '暗色'}
+          </button>
           <button
             className="text-xs text-gray-500 hover:text-primary-500 underline"
             onClick={() => {

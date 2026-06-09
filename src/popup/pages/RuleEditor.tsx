@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import {
-  Rule, RuleGroup, RuleMatch, Action, ActionType, MatchType,
+  Rule, RuleGroup, RuleMatch, Action, ActionType, MatchType, OperateType,
   ACTION_TYPE_LABELS, OPERATE_TYPE_LABELS, MATCH_TYPE_LABELS
 } from '../../shared/types';
 import { generateId, HTTP_METHODS, RESOURCE_TYPES, GROUP_COLORS } from '../../shared/constants';
@@ -31,13 +31,34 @@ export default function RuleEditor({ rule, groups, onSave, onCancel }: Props) {
   const [showNewGroup, setShowNewGroup] = useState(false);
   const [newGroupName, setNewGroupName] = useState('');
   const [newGroupColor, setNewGroupColor] = useState(GROUP_COLORS[0]);
+  const [testUrl, setTestUrl] = useState('');
+  const [testMethod, setTestMethod] = useState('');
+  const [testResourceType, setTestResourceType] = useState('');
+
+  function testMatch() {
+    if (!match.url.trim() || !testUrl.trim()) return null;
+    // URL match
+    var urlOk = false;
+    switch (match.matchType) {
+      case 'exact': urlOk = testUrl === match.url; break;
+      case 'contains': urlOk = testUrl.indexOf(match.url) >= 0; break;
+      case 'regex': try { urlOk = new RegExp(match.url).test(testUrl); } catch (_) { return { ok: false, reason: '正则表达式无效' }; } break;
+      case 'domain': try { var u = new URL(testUrl); urlOk = u.hostname === match.url || u.hostname.endsWith('.' + match.url); } catch (_) { return { ok: false, reason: '测试 URL 格式无效' }; } break;
+    }
+    if (!urlOk) return { ok: false, reason: 'URL 不匹配' };
+    if (match.method && match.method !== testMethod) return { ok: false, reason: '请求方法不匹配' };
+    if (match.resourceType && match.resourceType !== testResourceType) return { ok: false, reason: '资源类型不匹配' };
+    return { ok: true, reason: '匹配成功' };
+  }
+
+  var testResult = testMatch();
 
   const updateAction = (index: number, field: keyof Action, value: string) => {
     const newActions = [...actions];
     newActions[index] = { ...newActions[index], [field]: value };
     if (field === 'type') {
       const t = value as ActionType;
-      if (t === 'cancel' || t === 'redirect' || t === 'modifyStatusCode') {
+      if (t === 'cancel' || t === 'redirect' || t === 'modifyStatusCode' || t === 'delay') {
         newActions[index].operate = 'set';
       }
     }
@@ -67,6 +88,15 @@ export default function RuleEditor({ rule, groups, onSave, onCancel }: Props) {
       }
     }
 
+    // Validate group exists
+    if (showNewGroup && !newGroupName.trim()) {
+      alert('请输入新分组名称'); return;
+    }
+    if (!showNewGroup && !groups.find(g => g.id === groupId)) {
+      alert('所选分组不存在，请刷新后重试'); return;
+    }
+
+    try {
     const now = Date.now();
     const newRule: Rule = {
       id: rule?.id || generateId(),
@@ -102,11 +132,19 @@ export default function RuleEditor({ rule, groups, onSave, onCancel }: Props) {
     }
 
     onSave();
+    } catch (err) {
+      alert('保存失败：' + (err instanceof Error ? err.message : '未知错误'));
+    }
   };
 
-  const showKeyField = (type: ActionType) => !['cancel', 'modifyStatusCode'].includes(type);
+  const showKeyField = (type: ActionType) => !['cancel', 'modifyStatusCode', 'delay'].includes(type);
   const showValueField = (type: ActionType) => type !== 'cancel';
-  const showOperateField = (type: ActionType) => !['cancel', 'redirect', 'modifyStatusCode'].includes(type);
+  const showOperateField = (type: ActionType) => !['cancel', 'redirect', 'modifyStatusCode', 'delay'].includes(type);
+
+  const getAvailableOperates = (type: ActionType): (keyof typeof OPERATE_TYPE_LABELS)[] => {
+    if (type === 'modifyRequestBody' || type === 'modifyResponseBody') return ['set', 'replace'];
+    return Object.keys(OPERATE_TYPE_LABELS) as (keyof typeof OPERATE_TYPE_LABELS)[];
+  };
 
   const getKeyPlaceholder = (action: Action) => {
     if (action.operate === 'replace') return '正则表达式';
@@ -122,22 +160,23 @@ export default function RuleEditor({ rule, groups, onSave, onCancel }: Props) {
     if (action.type === 'modifyRequestBody') return '新的请求体内容 (支持 JSON)';
     if (action.type === 'redirect') return '目标 URL';
     if (action.type === 'modifyStatusCode') return 'HTTP 状态码 (如 200, 404)';
+    if (action.type === 'delay') return '延迟毫秒数 (如 3000)';
     return '值';
   };
 
   return (
     <div className="flex flex-col h-full">
       {/* Header */}
-      <div className="flex items-center justify-between px-4 py-2.5 border-b border-gray-100 bg-white">
+      <div className="flex items-center justify-between px-4 py-2.5 border-b border-gray-100 dark:border-gray-700 bg-white dark:bg-gray-900">
         <span className="text-sm font-semibold text-gray-800">
           {isEdit ? '编辑规则' : '新建规则'}
         </span>
         <button onClick={onCancel} className="text-gray-400 hover:text-gray-600 text-lg leading-none">&times;</button>
       </div>
 
-      <div className="overflow-y-auto flex-1 p-4 space-y-4 bg-gray-50">
+      <div className="overflow-y-auto flex-1 p-4 space-y-4 bg-gray-50 dark:bg-gray-800">
         {/* Basic info */}
-        <div className="bg-white rounded-lg border border-gray-200 p-3">
+        <div className="bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-600 p-3">
           <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-3">基本信息</h3>
           <div className="space-y-2.5">
             <div>
@@ -202,7 +241,7 @@ export default function RuleEditor({ rule, groups, onSave, onCancel }: Props) {
         </div>
 
         {/* Match conditions */}
-        <div className="bg-white rounded-lg border border-gray-200 p-3">
+        <div className="bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-600 p-3">
           <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-3">匹配条件</h3>
           <div className="space-y-2.5">
             {/* URL input — standalone full width for reliable focus */}
@@ -264,8 +303,35 @@ export default function RuleEditor({ rule, groups, onSave, onCancel }: Props) {
           </div>
         </div>
 
+        {/* Test Match */}
+        <div className="bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-600 p-3">
+          <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">测试匹配</h3>
+          <div className="flex gap-1.5 mb-2">
+            <input type="text" placeholder="输入测试 URL..."
+              value={testUrl} onChange={e => setTestUrl(e.target.value)}
+              className="form-input flex-1 text-xs" style={{ padding: '4px 8px', fontSize: 11 }} />
+            <select value={testMethod} onChange={e => setTestMethod(e.target.value)}
+              className="form-select text-xs" style={{ width: 80, padding: '4px 20px 4px 6px', fontSize: 11, backgroundPosition: 'right 4px center' }}>
+              <option value="">全部方法</option>
+              {HTTP_METHODS.filter(m => m).map(m => <option key={m} value={m}>{m}</option>)}
+            </select>
+            <select value={testResourceType} onChange={e => setTestResourceType(e.target.value)}
+              className="form-select text-xs" style={{ width: 80, padding: '4px 20px 4px 6px', fontSize: 11, backgroundPosition: 'right 4px center' }}>
+              <option value="">全部类型</option>
+              {RESOURCE_TYPES.filter(t => t).map(t => <option key={t} value={t}>{t}</option>)}
+            </select>
+          </div>
+          {testResult && (
+            <div className={`text-xs py-1.5 px-2 rounded font-medium ${
+              testResult.ok ? 'bg-green-50 text-green-600' : 'bg-red-50 text-red-500'
+            }`} style={{ fontSize: 11 }}>
+              {testResult.ok ? '匹配成功' : '不匹配 — ' + testResult.reason}
+            </div>
+          )}
+        </div>
+
         {/* Actions */}
-        <div className="bg-white rounded-lg border border-gray-200 p-3">
+        <div className="bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-600 p-3">
           <div className="flex items-center justify-between mb-3">
             <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wide">修改动作</h3>
             <button onClick={addAction} className="text-xs text-primary-500 hover:text-primary-600 font-medium">
@@ -274,7 +340,7 @@ export default function RuleEditor({ rule, groups, onSave, onCancel }: Props) {
           </div>
           <div className="space-y-3">
             {actions.map((action, i) => (
-              <div key={i} className="p-3 bg-gray-50 rounded-lg border border-gray-100">
+              <div key={i} className="p-3 bg-gray-50 dark:bg-gray-800 rounded-lg border border-gray-100 dark:border-gray-700">
                 <div className="flex items-center justify-between mb-2.5">
                   <div className="flex items-center gap-1.5">
                     <span className="text-xs text-gray-300 font-mono">#{i + 1}</span>
@@ -293,10 +359,10 @@ export default function RuleEditor({ rule, groups, onSave, onCancel }: Props) {
                       <select
                         value={action.operate}
                         onChange={(e) => updateAction(i, 'operate', e.target.value)}
-                        className="text-xs px-2 py-0.5 border border-gray-200 rounded bg-white text-gray-600 focus:outline-none focus:border-primary-400"
+                        className="text-xs px-2 py-0.5 border border-gray-200 dark:border-gray-600 rounded bg-white dark:bg-gray-900 text-gray-600 focus:outline-none focus:border-primary-400"
                       >
-                        {Object.entries(OPERATE_TYPE_LABELS).map(([k, v]) => (
-                          <option key={k} value={k}>{v}</option>
+                        {getAvailableOperates(action.type).map(k => (
+                          <option key={k} value={k}>{OPERATE_TYPE_LABELS[k]}</option>
                         ))}
                       </select>
                     )}
@@ -335,7 +401,7 @@ export default function RuleEditor({ rule, groups, onSave, onCancel }: Props) {
       </div>
 
       {/* Bottom bar */}
-      <div className="flex gap-2 px-4 py-3 bg-white border-t border-gray-200 shrink-0">
+      <div className="flex gap-2 px-4 py-3 bg-white dark:bg-gray-900 border-t border-gray-200 dark:border-gray-600 shrink-0">
         <button onClick={onCancel} className="btn-secondary flex-1">取消</button>
         <button onClick={handleSave} className="btn-primary flex-1">
           {isEdit ? '保存修改' : '创建规则'}

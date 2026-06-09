@@ -83,7 +83,7 @@ export function parseCurl(input: string): ApiRequest {
     }
     // Handle --data=value / --data-raw=value compact form
     if (/^--data(?:-raw|-binary|-urlencode)?=(.+)/i.test(t)) {
-      result.body = t.split('=')[1];
+      result.body = t.substring(t.indexOf('=') + 1);
       if (!result.method || result.method === 'GET') result.method = 'POST';
       continue;
     }

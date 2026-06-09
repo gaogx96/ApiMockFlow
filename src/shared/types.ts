@@ -19,7 +19,8 @@ export type ActionType =
   | 'modifyResponseBody'
   | 'modifyStatusCode'
   | 'redirect'
-  | 'cancel';
+  | 'cancel'
+  | 'delay';
 
 export type OperateType = 'set' | 'append' | 'remove' | 'replace';
 
@@ -98,6 +99,7 @@ export const ACTION_TYPE_LABELS: Record<ActionType, string> = {
   modifyStatusCode: '修改状态码',
   redirect: '重定向请求',
   cancel: '拦截请求',
+  delay: '延迟响应',
 };
 
 export const OPERATE_TYPE_LABELS: Record<OperateType, string> = {
