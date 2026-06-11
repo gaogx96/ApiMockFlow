@@ -3,7 +3,7 @@
   "name": "ApiMockFlow",
   "version": "1.0.0",
   "description": "修改请求参数和响应数据的浏览器插件",
-  "permissions": ["storage", "cookies"],
+  "permissions": ["storage", "cookies", "scripting"],
   "host_permissions": ["<all_urls>"],
   "background": {
     "service_worker": "background.js"

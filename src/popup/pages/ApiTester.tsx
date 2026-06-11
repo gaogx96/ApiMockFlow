@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { ArrowUpTrayIcon, SignalIcon, ClockIcon, XMarkIcon, PlusIcon, BookmarkIcon, BookmarkSlashIcon } from '@heroicons/react/24/outline';
+import { ArrowUpTrayIcon, SignalIcon, ClockIcon, XMarkIcon, PlusIcon, BookmarkIcon, BookmarkSlashIcon, ShieldCheckIcon } from '@heroicons/react/24/outline';
 import { ApiRequest, ApiResponse, ApiHistoryItem, SavedRequest } from '../../shared/api-types';
 import { parseImport } from '../../shared/import-parser';
 import { generateId } from '../../shared/constants';
@@ -33,7 +33,11 @@ function createTab(name?: string): TabData {
   };
 }
 
-export default function ApiTester() {
+interface Props {
+  onCreateRule?: (prefill: { url: string; method: string }) => void;
+}
+
+export default function ApiTester({ onCreateRule }: Props) {
   const [tabs, setTabs] = useState<TabData[]>([createTab()]);
   const [activeIdx, setActiveIdx] = useState(0);
   const [activeSubTab, setActiveSubTab] = useState<'headers' | 'body' | 'response' | 'history' | 'saved'>('headers');
@@ -83,6 +87,10 @@ export default function ApiTester() {
     return r;
   }
 
+  function hasContentType(h: Record<string, string>): boolean {
+    return Object.keys(h).some(k => k.toLowerCase() === 'content-type');
+  }
+
   async function sendRequest() {
     if (!tab.url.trim()) { updateTab('error', '请输入 URL'); return; }
     updateTab('loading', true);
@@ -91,7 +99,7 @@ export default function ApiTester() {
     setActiveSubTab('response');
 
     const h = getHeadersRecord();
-    if (tab.body && !h['Content-Type']) {
+    if (tab.body && !hasContentType(h)) {
       h['Content-Type'] = tab.bodyType === 'urlencoded'
         ? 'application/x-www-form-urlencoded'
         : 'application/json';
@@ -214,16 +222,16 @@ export default function ApiTester() {
   ];
 
   return (
-    <div className="flex flex-col h-full bg-white dark:bg-gray-900">
+    <div className="flex flex-col h-full bg-white dark:bg-slate-800">
       {/* Tab Bar */}
-      <div className="flex items-center border-b border-gray-100 dark:border-gray-700 bg-gray-50 dark:bg-gray-800 shrink-0" style={{ height: 28 }}>
+      <div className="flex items-center border-b border-gray-100 dark:border-slate-700 bg-gray-50 dark:bg-slate-900 shrink-0" style={{ height: 28 }}>
         <div ref={tabScrollRef} className="flex-1 flex items-center overflow-x-auto" style={{ scrollbarWidth: 'none' }}>
           {tabs.map((t, i) => (
             <div
               key={t.id}
               onClick={() => setActiveIdx(i)}
-              className={`flex items-center gap-1 px-2 h-7 text-xs cursor-pointer border-r border-gray-200 dark:border-gray-600 shrink-0 max-w-[120px] ${
-                i === activeIdx ? 'bg-white dark:bg-gray-900 text-primary-600 font-medium' : 'text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-700'
+              className={`flex items-center gap-1 px-2 h-7 text-xs cursor-pointer border-r border-gray-200 dark:border-slate-700 shrink-0 max-w-[120px] ${
+                i === activeIdx ? 'bg-white dark:bg-slate-800 text-primary-600 font-medium' : 'text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-700'
               }`}
             >
               <span className={`method-badge method-${t.method} scale-75`}>{t.method}</span>
@@ -246,7 +254,7 @@ export default function ApiTester() {
       </div>
 
       {/* URL Bar */}
-      <div className="px-2 py-1.5 border-b border-gray-100 dark:border-gray-700 shrink-0">
+      <div className="px-2 py-1.5 border-b border-gray-100 dark:border-slate-700 shrink-0">
         <div className="flex gap-1">
           <select value={tab.method} onChange={e => updateTab('method', e.target.value)}
             className="form-select shrink-0 text-xs" style={{ width: '78px', padding: '4px 20px 4px 6px', fontSize: 11, backgroundPosition: 'right 4px center' }}>
@@ -261,12 +269,12 @@ export default function ApiTester() {
             {tab.loading ? '发送中...' : '发送'}
           </button>
           <button onClick={handleSave}
-            className="px-2 py-1 text-xs text-gray-500 border border-gray-200 dark:border-gray-600 rounded-md hover:bg-gray-50 dark:hover:bg-gray-800 dark:bg-gray-800"
+            className="px-2 py-1 text-xs text-gray-500 border border-gray-200 dark:border-slate-700 rounded-md hover:bg-gray-50 dark:hover:bg-gray-800 dark:bg-slate-900"
             title="保存请求">
             <BookmarkIcon className="w-3.5 h-3.5" />
           </button>
           <button onClick={() => setShowImport(!showImport)}
-            className="px-2 py-1 text-xs text-gray-500 border border-gray-200 dark:border-gray-600 rounded-md hover:bg-gray-50 dark:hover:bg-gray-800 dark:bg-gray-800"
+            className="px-2 py-1 text-xs text-gray-500 border border-gray-200 dark:border-slate-700 rounded-md hover:bg-gray-50 dark:hover:bg-gray-800 dark:bg-slate-900"
             title="导入 cURL / HTTPie / OpenAPI">
             <ArrowUpTrayIcon className="w-3.5 h-3.5" />
           </button>
@@ -275,7 +283,7 @@ export default function ApiTester() {
 
       {/* Save dialog */}
       {showSaveDialog && (
-        <div className="px-2 py-1.5 border-b border-gray-100 dark:border-gray-700 bg-blue-50 shrink-0 flex gap-1.5 items-center">
+        <div className="px-2 py-1.5 border-b border-gray-100 dark:border-slate-700 bg-blue-50 shrink-0 flex gap-1.5 items-center">
           <input type="text" placeholder="请求名称..."
             value={saveName} onChange={e => setSaveName(e.target.value)}
             onKeyDown={e => { if (e.key === 'Enter') confirmSave(); if (e.key === 'Escape') setShowSaveDialog(false); }}
@@ -288,7 +296,7 @@ export default function ApiTester() {
 
       {/* Import panel */}
       {showImport && (
-        <div className="px-2 py-1.5 border-b border-gray-100 dark:border-gray-700 bg-gray-50 dark:bg-gray-800 shrink-0">
+        <div className="px-2 py-1.5 border-b border-gray-100 dark:border-slate-700 bg-gray-50 dark:bg-slate-900 shrink-0">
           <textarea
             placeholder="粘贴 cURL、HTTPie 或 OpenAPI JSON..."
             value={importText}
@@ -299,16 +307,16 @@ export default function ApiTester() {
           <div className="flex gap-1.5 mb-1.5">
             <button onClick={handleImport} className="px-2.5 py-1 text-xs bg-primary-500 text-white rounded font-medium">解析</button>
             <button onClick={() => { setShowImport(false); setImportText(''); setImportedReqs([]); }}
-              className="px-2.5 py-1 text-xs text-gray-500 border border-gray-200 dark:border-gray-600 rounded font-medium">取消</button>
+              className="px-2.5 py-1 text-xs text-gray-500 border border-gray-200 dark:border-slate-700 rounded font-medium">取消</button>
           </div>
           {importedReqs.length > 0 && (
-            <div className="bg-white dark:bg-gray-900 rounded border border-gray-200 dark:border-gray-600 max-h-24 overflow-y-auto">
-              <div className="flex items-center justify-between px-2 py-1 border-b border-gray-100 dark:border-gray-700 bg-gray-50 dark:bg-gray-800">
+            <div className="bg-white dark:bg-slate-800 rounded border border-gray-200 dark:border-slate-700 max-h-24 overflow-y-auto">
+              <div className="flex items-center justify-between px-2 py-1 border-b border-gray-100 dark:border-slate-700 bg-gray-50 dark:bg-slate-900">
                 <span className="text-xs text-gray-500">解析出 {importedReqs.length} 个请求</span>
               </div>
               {importedReqs.map((r, i) => (
                 <div key={i} onClick={() => importOneToNewTab(r)}
-                  className="flex items-center gap-1.5 px-2 py-1 cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-800 dark:bg-gray-800 text-xs border-b border-gray-50 dark:border-gray-700 last:border-0">
+                  className="flex items-center gap-1.5 px-2 py-1 cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-800 dark:bg-slate-900 text-xs border-b border-gray-50 dark:border-slate-700 last:border-0">
                   <span className={`method-badge method-${r.method}`} style={{ fontSize: 9 }}>{r.method}</span>
                   <span className="text-gray-600 truncate flex-1">{r.url}</span>
                 </div>
@@ -319,7 +327,7 @@ export default function ApiTester() {
       )}
 
       {/* Sub Tabs */}
-      <div className="flex border-b border-gray-100 dark:border-gray-700 px-2 bg-gray-50 dark:bg-gray-800 shrink-0">
+      <div className="flex border-b border-gray-100 dark:border-slate-700 px-2 bg-gray-50 dark:bg-slate-900 shrink-0">
         {SUB_TABS.map(st => (
           <button key={st.key}
             className={`px-2.5 py-1.5 text-xs font-medium border-b-2 transition-colors ${
@@ -394,7 +402,7 @@ export default function ApiTester() {
                   <summary className="text-xs font-medium text-gray-600 cursor-pointer" style={{ fontSize: 11 }}>
                     响应头 ({Object.keys(tab.response.headers).length})
                   </summary>
-                  <div className="mt-1 bg-gray-50 dark:bg-gray-800 rounded p-1.5 text-xs max-h-20 overflow-y-auto" style={{ fontSize: 10 }}>
+                  <div className="mt-1 bg-gray-50 dark:bg-slate-900 rounded p-1.5 text-xs max-h-20 overflow-y-auto" style={{ fontSize: 10 }}>
                     {Object.entries(tab.response.headers).map(([k, v]) => (
                       <div key={k}><span className="text-gray-400">{k}:</span> {v}</div>
                     ))}
@@ -402,7 +410,7 @@ export default function ApiTester() {
                 </details>
                 <div>
                   <div className="text-xs font-medium text-gray-600 mb-0.5" style={{ fontSize: 11 }}>响应体</div>
-                  <pre className="bg-gray-50 dark:bg-gray-800 rounded p-1.5 text-xs max-h-44 overflow-y-auto whitespace-pre-wrap break-all" style={{ fontSize: 10 }}>
+                  <pre className="bg-gray-50 dark:bg-slate-900 rounded p-1.5 text-xs max-h-44 overflow-y-auto whitespace-pre-wrap break-all" style={{ fontSize: 10 }}>
                     {formatJson(tab.response.body)}
                   </pre>
                 </div>
@@ -431,7 +439,7 @@ export default function ApiTester() {
             ) : (
               history.map((item) => (
                 <div key={item.id}
-                  className="px-2 py-1.5 cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-800 dark:bg-gray-800 transition-colors"
+                  className="px-2 py-1.5 cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-800 dark:bg-slate-900 transition-colors"
                   onClick={() => loadRequestToTab(item.request)}>
                   <div className="flex items-center gap-1.5">
                     <span className={`method-badge method-${item.request.method}`} style={{ fontSize: 9 }}>{item.request.method}</span>
@@ -459,7 +467,7 @@ export default function ApiTester() {
             ) : (
               saved.map((item) => (
                 <div key={item.id}
-                  className="px-2 py-1.5 cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-800 dark:bg-gray-800 transition-colors group flex items-center"
+                  className="px-2 py-1.5 cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-800 dark:bg-slate-900 transition-colors group flex items-center"
                   onClick={() => loadRequestToTab(item.request)}>
                   <div className="flex-1 min-w-0">
                     <div className="text-xs font-medium text-gray-700 truncate" style={{ fontSize: 11 }}>{item.name}</div>
@@ -468,6 +476,14 @@ export default function ApiTester() {
                       <span className="text-xs text-gray-400 truncate" style={{ fontSize: 10 }}>{item.request.url}</span>
                     </div>
                   </div>
+                  {onCreateRule && (
+                    <button
+                      onClick={(e) => { e.stopPropagation(); onCreateRule({ url: item.request.url, method: item.request.method }); }}
+                      className="opacity-0 group-hover:opacity-100 text-gray-300 hover:text-primary-500 ml-1"
+                      title="创建规则">
+                      <ShieldCheckIcon className="w-3.5 h-3.5" />
+                    </button>
+                  )}
                   <button
                     onClick={(e) => deleteSaved(item.id, e)}
                     className="opacity-0 group-hover:opacity-100 text-gray-300 hover:text-red-500 ml-1"

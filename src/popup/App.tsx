@@ -1,23 +1,25 @@
 import React, { useState, useEffect } from 'react';
-import { BoltIcon, Cog6ToothIcon, BeakerIcon, SunIcon, MoonIcon } from '@heroicons/react/24/outline';
-import { AppState, Rule } from '../shared/types';
+import { BoltIcon, BeakerIcon, SunIcon, MoonIcon, DocumentMagnifyingGlassIcon } from '@heroicons/react/24/outline';
+import { AppState, Rule, RuleMatch } from '../shared/types';
 import RuleList from './pages/RuleList';
 import RuleEditor from './pages/RuleEditor';
 import ApiTester from './pages/ApiTester';
+import NetworkLog from './pages/NetworkLog';
 
-export type Page = 'list' | 'editor' | 'apitest';
+export type Page = 'list' | 'editor' | 'apitest' | 'networklog';
 
 export default function App() {
   const [page, setPage] = useState<Page>('list');
   const [state, setState] = useState<AppState>({
     globalEnabled: true,
     rules: [],
-    groups: [{ id: 'default', name: '默认分组', enabled: true, color: '#1677ff' }],
+    groups: [{ id: 'default', name: '默认分组', enabled: true, color: '#3b82f6' }],
   });
   const [editingRule, setEditingRule] = useState<Rule | null>(null);
+  const [prefillMatch, setPrefillMatch] = useState<Partial<RuleMatch> | null>(null);
   const [dark, setDark] = useState(false);
+  const [logCount, setLogCount] = useState(0);
 
-  // Load dark mode preference
   useEffect(() => {
     chrome.storage.local.get('theme', (res) => {
       const isDark = res.theme === 'dark';
@@ -35,14 +37,24 @@ export default function App() {
 
   const refreshState = () => {
     chrome.runtime.sendMessage({ type: 'GET_STATE' }, (res) => {
-      if (res) {
-        setState(res);
-        console.log('[ApiMockFlow] STATE:', JSON.stringify({ rules: res.rules, groups: res.groups, globalEnabled: res.globalEnabled }, null, 2));
-      }
+      if (res) setState(res);
     });
   };
 
   useEffect(() => { refreshState(); }, []);
+
+  useEffect(() => {
+    const fetch = () => {
+      chrome.runtime.sendMessage({ type: 'LOG_GET' }, (res) => {
+        const err = chrome.runtime.lastError;
+        if (err || !res) return;
+        setLogCount(res.length);
+      });
+    };
+    fetch();
+    const t = setInterval(fetch, 10000);
+    return () => clearInterval(t);
+  }, []);
 
   const toggleGlobal = async () => {
     const newVal = !state.globalEnabled;
@@ -52,11 +64,19 @@ export default function App() {
 
   const handleEditRule = (rule: Rule | null) => {
     setEditingRule(rule);
+    setPrefillMatch(null);
+    setPage('editor');
+  };
+
+  const handleCreateFromLog = (prefill: Partial<RuleMatch>) => {
+    setEditingRule(null);
+    setPrefillMatch(prefill);
     setPage('editor');
   };
 
   const handleSaveRule = () => {
     refreshState();
+    setPrefillMatch(null);
     setPage('list');
   };
 
@@ -64,86 +84,61 @@ export default function App() {
   const activeRuleCount = state.rules.filter((r) => r.enabled).length;
 
   return (
-    <div className="flex h-full" style={{ height: '580px' }}>
-      {/* Sidebar */}
-      <aside className="w-44 bg-gray-50 dark:bg-gray-800 border-r border-gray-200 dark:border-gray-700 flex flex-col shrink-0">
-        {/* Logo area */}
-        <div className="px-3 py-3 border-b border-gray-200 dark:border-gray-700">
-          <div className="flex items-center gap-1.5">
-            <BoltIcon className="w-4 h-4 text-primary-500" />
-            <span className="text-sm font-bold text-gray-800 tracking-tight">ApiMockFlow</span>
-          </div>
-          <div className="flex items-center gap-2 mt-2">
-            <div
-              className={`toggle-switch ${state.globalEnabled ? 'active' : ''}`}
-              onClick={toggleGlobal}
-              title={state.globalEnabled ? '暂停拦截' : '启用拦截'}
-            />
-            <span className={`text-xs font-medium ${state.globalEnabled ? 'text-green-600' : 'text-gray-400'}`}>
-              {state.globalEnabled ? '运行中' : '已暂停'}
+    <div className="flex flex-col h-full" style={{ height: '580px' }}>
+      {/* Header bar */}
+      <div className="header-bar">
+        <div className="flex items-center gap-2">
+          <BoltIcon className="w-5 h-5 text-white opacity-80" />
+          <span className="text-sm font-bold text-white tracking-tight">ApiMockFlow</span>
+        </div>
+        <div className="flex items-center gap-2 ml-auto">
+          <div
+            className={`toggle-switch ${state.globalEnabled ? 'active' : ''}`}
+            onClick={toggleGlobal}
+            title={state.globalEnabled ? '暂停拦截' : '启用拦截'}
+          />
+          <span className="text-xs text-white opacity-80">
+            {state.globalEnabled ? '运行中' : '已暂停'}
+          </span>
+        </div>
+      </div>
+
+      {/* Tab bar */}
+      <div className="tab-bar">
+        <div
+          className={`tab-item ${page === 'list' || page === 'editor' ? 'active' : ''}`}
+          onClick={() => setPage('list')}
+        >
+          规则
+          {ruleCount > 0 && (
+            <span className="text-xs opacity-60">{ruleCount}</span>
+          )}
+        </div>
+        <div
+          className={`tab-item ${page === 'apitest' ? 'active' : ''}`}
+          onClick={() => setPage('apitest')}
+        >
+          <BeakerIcon className="w-3.5 h-3.5" />
+          API 测试
+        </div>
+        <div
+          className={`tab-item ${page === 'networklog' ? 'active' : ''}`}
+          onClick={() => setPage('networklog')}
+        >
+          <DocumentMagnifyingGlassIcon className="w-3.5 h-3.5" />
+          拦截日志
+          {logCount > 0 && (
+            <span className="ml-0.5 px-1.5 py-0.5 text-xs rounded-full bg-blue-500 text-white" style={{ fontSize: 9, lineHeight: 1 }}>
+              {logCount}
             </span>
-          </div>
+          )}
         </div>
-
-        {/* Navigation */}
-        <nav className="flex-1 py-2">
-          <div
-            className={`sidebar-item ${page === 'list' ? 'active' : ''}`}
-            onClick={() => setPage('list')}
-          >
-            <Cog6ToothIcon className="w-4 h-4" />
-            <span>规则</span>
-            {ruleCount > 0 && (
-              <span className="ml-auto text-xs text-gray-400">{activeRuleCount}/{ruleCount}</span>
-            )}
-          </div>
-          <div
-            className={`sidebar-item ${page === 'apitest' ? 'active' : ''}`}
-            onClick={() => setPage('apitest')}
-          >
-            <BeakerIcon className="w-4 h-4" />
-            <span>API 测试</span>
-          </div>
-        </nav>
-
-        {/* Footer */}
-        <div className="px-3 py-2 border-t border-gray-200 dark:border-gray-700 space-y-1">
-          <div className="text-xs text-gray-400">
-            {state.groups.length} 个分组 · {ruleCount} 条规则
-          </div>
-          <div className="text-xs text-gray-400">
-            全局: {state.globalEnabled ? 'ON' : 'OFF'}
-          </div>
-          <button
-            className="flex items-center gap-1.5 text-xs text-gray-400 hover:text-gray-600 transition-colors"
-            onClick={toggleTheme}
-          >
-            {dark ? <SunIcon className="w-3.5 h-3.5" /> : <MoonIcon className="w-3.5 h-3.5" />}
-            {dark ? '亮色' : '暗色'}
-          </button>
-          <button
-            className="text-xs text-gray-500 hover:text-primary-500 underline"
-            onClick={() => {
-              chrome.runtime.sendMessage({ type: 'GET_STATE' }, (res) => {
-                console.log('=== FULL STATE ===');
-                console.log(JSON.stringify(res, null, 2));
-                alert('已导出到 Console（右键插件图标 → 检查弹出内容 → Console）');
-              });
-            }}
-          >
-            导出状态到 Console
-          </button>
-        </div>
-      </aside>
+      </div>
 
       {/* Main content */}
-      <main className="flex-1 flex flex-col overflow-hidden">
+      <main className="flex-1 flex flex-col overflow-hidden bg-slate-100 dark:bg-slate-900">
         {page === 'list' && (
-          <RuleList
-            state={state}
-            onRefresh={refreshState}
-            onEditRule={handleEditRule}
-          />
+          <RuleList state={state} onRefresh={refreshState} onEditRule={handleEditRule} />
         )}
         {page === 'editor' && (
           <RuleEditor
@@ -151,10 +146,30 @@ export default function App() {
             groups={state.groups}
             onSave={handleSaveRule}
             onCancel={() => setPage('list')}
+            prefill={prefillMatch}
           />
         )}
-        {page === 'apitest' && <ApiTester />}
+        {page === 'apitest' && <ApiTester onCreateRule={(prefill) => {
+          setEditingRule(null);
+          setPrefillMatch({ url: prefill.url, matchType: 'contains', method: prefill.method, resourceType: '' });
+          setPage('editor');
+        }} />}
+        {page === 'networklog' && <NetworkLog onCreateRule={handleCreateFromLog} />}
       </main>
+
+      {/* Status bar */}
+      <div className="status-bar">
+        <span className="text-xs text-gray-400 dark:text-slate-500">
+          {state.groups.length} 分组 · {ruleCount} 规则
+        </span>
+        <button
+          className="flex items-center gap-1 text-xs text-gray-400 hover:text-gray-600 dark:text-slate-500 dark:hover:text-slate-300 transition-colors"
+          onClick={toggleTheme}
+          title={dark ? '切换亮色' : '切换暗色'}
+        >
+          {dark ? <SunIcon className="w-3.5 h-3.5" /> : <MoonIcon className="w-3.5 h-3.5" />}
+        </button>
+      </div>
     </div>
   );
 }

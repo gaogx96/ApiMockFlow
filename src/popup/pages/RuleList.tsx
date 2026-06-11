@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { MagnifyingGlassIcon, PlusIcon, ArrowDownTrayIcon, ArrowUpTrayIcon, TrashIcon, ClipboardDocumentListIcon, ChevronUpIcon, ChevronDownIcon } from '@heroicons/react/24/outline';
 import { AppState, Rule, MATCH_TYPE_LABELS, ACTION_TYPE_LABELS } from '../../shared/types';
+import { showToast, showConfirm } from '../../shared/toast';
 
 interface Props {
   state: AppState;
@@ -27,7 +28,7 @@ export default function RuleList({ state, onRefresh, onEditRule }: Props) {
 
   const deleteRule = async (ruleId: string, e: React.MouseEvent) => {
     e.stopPropagation();
-    if (!confirm('确定删除此规则？')) return;
+    if (!await showConfirm('确定删除此规则？')) return;
     await chrome.runtime.sendMessage({ type: 'DELETE_RULE', payload: { id: ruleId } });
     onRefresh();
   };
@@ -64,7 +65,7 @@ export default function RuleList({ state, onRefresh, onEditRule }: Props) {
         await chrome.runtime.sendMessage({ type: 'IMPORT_RULES', payload: text });
         onRefresh();
       } catch {
-        alert('导入失败：无效的 JSON 文件');
+        showToast('导入失败：无效的 JSON 文件', 'error');
       }
     };
     input.click();
@@ -75,7 +76,7 @@ export default function RuleList({ state, onRefresh, onEditRule }: Props) {
   return (
     <div className="flex flex-col h-full">
       {/* Toolbar */}
-      <div className="px-3 py-2.5 border-b border-gray-100 dark:border-gray-700 bg-white dark:bg-gray-900">
+      <div className="px-3 py-2.5 border-b border-gray-100 dark:border-slate-700 bg-white dark:bg-slate-800">
         <div className="flex gap-2">
           <div className="relative flex-1">
             <input
@@ -83,7 +84,7 @@ export default function RuleList({ state, onRefresh, onEditRule }: Props) {
               placeholder="搜索规则名称或 URL..."
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              className="w-full pl-8 pr-3 py-1.5 text-xs border border-gray-200 dark:border-gray-600 rounded-md focus:outline-none focus:border-primary-400 focus:ring-1 focus:ring-primary-100 bg-gray-50 dark:bg-gray-800"
+              className="w-full pl-8 pr-3 py-1.5 text-xs border border-gray-200 dark:border-slate-700 rounded-md focus:outline-none focus:border-primary-400 focus:ring-1 focus:ring-primary-100 bg-gray-50 dark:bg-slate-900"
             />
             <MagnifyingGlassIcon className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400" />
           </div>
@@ -100,7 +101,7 @@ export default function RuleList({ state, onRefresh, onEditRule }: Props) {
           <div className="flex gap-1.5 mt-2 overflow-x-auto pb-0.5">
             <button
               className={`px-2.5 py-1 text-xs rounded-full font-medium transition-colors ${
-                !filterGroup ? 'bg-primary-50 text-primary-600' : 'bg-gray-100 text-gray-500 hover:bg-gray-200'
+                !filterGroup ? 'bg-primary-50 text-primary-600 dark:bg-slate-700 dark:text-blue-400' : 'bg-gray-100 text-gray-500 hover:bg-gray-200 dark:bg-slate-800 dark:text-slate-400 dark:hover:bg-slate-700'
               }`}
               onClick={() => setFilterGroup('')}
             >
@@ -110,7 +111,7 @@ export default function RuleList({ state, onRefresh, onEditRule }: Props) {
               <button
                 key={g.id}
                 className={`px-2.5 py-1 text-xs rounded-full font-medium transition-colors ${
-                  filterGroup === g.id ? 'bg-primary-500 text-white' : 'bg-gray-100 text-gray-500 hover:bg-gray-200'
+                  filterGroup === g.id ? 'bg-primary-500 text-white' : 'bg-gray-100 text-gray-500 hover:bg-gray-200 dark:bg-slate-800 dark:text-slate-400 dark:hover:bg-slate-700'
                 }`}
                 onClick={() => setFilterGroup(g.id)}
               >
@@ -134,7 +135,7 @@ export default function RuleList({ state, onRefresh, onEditRule }: Props) {
             </div>
           </div>
         ) : (
-          <div className="divide-y divide-gray-50">
+          <div className="divide-y divide-gray-200 dark:divide-slate-700">
             {filteredRules.map((rule) => {
               const group = getGroup(rule.groupId);
               const actionCount = rule.actions?.length || 0;
@@ -143,7 +144,7 @@ export default function RuleList({ state, onRefresh, onEditRule }: Props) {
               return (
                 <div
                   key={rule.id}
-                  className={`px-3 py-2.5 hover:bg-gray-50 dark:hover:bg-gray-800 dark:bg-gray-800 cursor-pointer transition-colors ${!rule.enabled ? 'opacity-50' : ''}`}
+                  className={`px-3 py-2.5 hover:bg-white dark:hover:bg-slate-800 cursor-pointer transition-colors ${!rule.enabled ? 'opacity-50' : ''}`}
                   onClick={() => onEditRule(rule)}
                 >
                   <div className="flex items-center gap-2">
@@ -156,7 +157,7 @@ export default function RuleList({ state, onRefresh, onEditRule }: Props) {
                     {/* Name + URL */}
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center gap-1.5">
-                        <span className="text-xs font-medium text-gray-800 truncate">{rule.name}</span>
+                        <span className="text-xs font-medium text-gray-800 dark:text-slate-200 truncate">{rule.name}</span>
                         {group && (
                           <span
                             className="px-1.5 py-px text-xs rounded font-medium shrink-0"
@@ -166,7 +167,7 @@ export default function RuleList({ state, onRefresh, onEditRule }: Props) {
                           </span>
                         )}
                       </div>
-                      <div className="text-xs text-gray-400 truncate mt-0.5 font-mono">
+                      <div className="text-xs text-gray-500 dark:text-slate-500 truncate mt-0.5 font-mono">
                         {MATCH_TYPE_LABELS[rule.match?.matchType || 'contains']}: {rule.match?.url || ''}
                       </div>
                     </div>
@@ -187,23 +188,18 @@ export default function RuleList({ state, onRefresh, onEditRule }: Props) {
                       onClick={(e) => { e.stopPropagation(); toggleRule(rule.id, !rule.enabled); }}
                     />
 
-                    {/* Move buttons */}
-                    <div className="flex flex-col shrink-0">
+                    {/* Move + Delete (hover only) */}
+                    <div className="rule-hover-actions flex items-center gap-0.5 shrink-0">
                       <button className="btn-ghost p-0 leading-none" onClick={(e) => { e.stopPropagation(); moveRule(state.rules.findIndex(r => r.id === rule.id), -1); }} title="上移">
                         <ChevronUpIcon className="w-3.5 h-3.5" />
                       </button>
                       <button className="btn-ghost p-0 leading-none" onClick={(e) => { e.stopPropagation(); moveRule(state.rules.findIndex(r => r.id === rule.id), 1); }} title="下移">
                         <ChevronDownIcon className="w-3.5 h-3.5" />
                       </button>
+                      <button className="btn-ghost p-1 text-xs" onClick={(e) => deleteRule(rule.id, e)} title="删除">
+                        <TrashIcon className="w-4 h-4" />
+                      </button>
                     </div>
-                    {/* Delete */}
-                    <button
-                      className="btn-ghost p-1 text-xs shrink-0"
-                      onClick={(e) => deleteRule(rule.id, e)}
-                      title="删除"
-                    >
-                      <TrashIcon className="w-4 h-4" />
-                    </button>
                   </div>
                 </div>
               );
@@ -213,16 +209,16 @@ export default function RuleList({ state, onRefresh, onEditRule }: Props) {
       </div>
 
       {/* Bottom bar */}
-      <div className="flex gap-2 px-3 py-2 border-t border-gray-100 dark:border-gray-700 bg-gray-50 dark:bg-gray-800 shrink-0">
+      <div className="flex gap-2 px-3 py-2 border-t border-gray-100 dark:border-slate-700 bg-gray-50 dark:bg-slate-900 shrink-0">
         <button
           onClick={handleExport}
-          className="flex-1 py-1.5 text-xs text-gray-600 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-600 rounded-md hover:bg-gray-50 dark:hover:bg-gray-800 dark:bg-gray-800 font-medium"
+          className="flex-1 py-1.5 text-xs text-gray-600 bg-white dark:bg-slate-800 border border-gray-200 dark:border-slate-700 rounded-md hover:bg-gray-50 dark:hover:bg-slate-700 font-medium"
         >
           <ArrowDownTrayIcon className="w-3.5 h-3.5 inline -mt-0.5" /> 导出
         </button>
         <button
           onClick={handleImport}
-          className="flex-1 py-1.5 text-xs text-gray-600 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-600 rounded-md hover:bg-gray-50 dark:hover:bg-gray-800 dark:bg-gray-800 font-medium"
+          className="flex-1 py-1.5 text-xs text-gray-600 bg-white dark:bg-slate-800 border border-gray-200 dark:border-slate-700 rounded-md hover:bg-gray-50 dark:hover:bg-slate-700 font-medium"
         >
           <ArrowUpTrayIcon className="w-3.5 h-3.5 inline -mt-0.5" /> 导入
         </button>

@@ -13,6 +13,21 @@ function setIcon(enabled: boolean) {
 // Init icon on startup
 storageGet('globalEnabled', true).then(setIcon);
 
+// Inject interceptor into all existing tabs (for "use without refresh")
+function injectAllTabs() {
+  chrome.tabs.query({}, (tabs) => {
+    for (const tab of tabs) {
+      if (!tab.id || !tab.url || tab.url.startsWith('chrome://') || tab.url.startsWith('chrome-extension://')) continue;
+      chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['content.js'] }).catch(() => {});
+    }
+  });
+}
+
+// Auto-inject on install/update
+chrome.runtime.onInstalled.addListener(() => {
+  injectAllTabs();
+});
+
 interface Rule {
   id: string; name: string; groupId: string; enabled: boolean;
   match: { url: string; matchType: string; method: string; resourceType: string };
@@ -104,6 +119,7 @@ chrome.runtime.onMessage.addListener((msg: any, _sender: any, sendResponse: any)
   if (t === 'TOGGLE_GLOBAL') {
     storageSet('globalEnabled', msg.payload).then(() => {
       setIcon(msg.payload);
+      if (msg.payload) injectAllTabs();
       sendResponse({ success: true });
     });
     return true;
@@ -213,6 +229,18 @@ chrome.runtime.onMessage.addListener((msg: any, _sender: any, sendResponse: any)
 
   // ---- Saved Requests ----
   if (t === 'API_SAVED_GET') { storageGet<any[]>('savedRequests', []).then(sendResponse); return true; }
+
+  // ---- Intercepted Request Log ----
+  if (t === 'LOG_SAVE') {
+    storageGet<any[]>('interceptLog', []).then(log => {
+      log.unshift(msg.payload);
+      if (log.length > 200) log.length = 200;
+      return storageSet('interceptLog', log);
+    }).then(() => sendResponse({ ok: true })).catch(() => sendResponse({ ok: false }));
+    return true;
+  }
+  if (t === 'LOG_GET') { storageGet<any[]>('interceptLog', []).then(sendResponse); return true; }
+  if (t === 'LOG_CLEAR') { storageSet('interceptLog', []).then(() => sendResponse({ success: true })); return true; }
   if (t === 'API_SAVED_SAVE') {
     storageGet<any[]>('savedRequests', []).then(list => {
       list.unshift(msg.payload);

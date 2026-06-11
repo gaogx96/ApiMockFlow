@@ -96,11 +96,22 @@ export function parseCurl(input: string): ApiRequest {
       continue;
     }
 
+    // Cookie: -b / --cookie
+    if ((t === '-b' || t === '--cookie') && i + 1 < tokens.length) {
+      result.headers['Cookie'] = tokens[++i];
+      continue;
+    }
+    // Compact: -b<value> (no space)
+    if (/^-b(.+)/.test(t) && t.length > 2) {
+      result.headers['Cookie'] = t.slice(2);
+      continue;
+    }
+
     // Compressed
     if (t === '--compressed') continue;
 
     // Connect timeout, max-time, etc — skip flag + value
-    if (/^--?(?:connect-timeout|max-time|retry|user|proxy|cookie|referer|user-agent|output|silent|location|insecure|include|head|verbose|fail|show-error|http\d)/i.test(t)) {
+    if (/^--?(?:connect-timeout|max-time|retry|user|proxy|referer|user-agent|output|silent|location|insecure|include|head|verbose|fail|show-error|http\d)/i.test(t)) {
       if (!/^--?(?:silent|location|insecure|include|head|verbose|fail|show-error|compressed)$/i.test(t)) i++; // skip value
       continue;
     }

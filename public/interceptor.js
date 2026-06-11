@@ -1,4 +1,5 @@
 // Main-world interceptor — local matching, zero bridge overhead
+if (window.__APII_INIT) { /* already injected */ } else { window.__APII_INIT = true;
 (function () {
   'use strict';
 
@@ -15,10 +16,13 @@
   function safeRe(p, f) { try { return new RegExp(p, f); } catch (_) { return null; } }
   function hdrRec(h) { var r = {}; h.forEach(function (v, k) { r[k] = v; }); return r; }
   function parseHdr(raw) { var r = {}; raw.trim().split(/[\r\n]+/).forEach(function (line) { var idx = line.indexOf(': '); if (idx > 0) r[line.slice(0, idx)] = line.slice(idx + 2); }); return r; }
-  var REQ = ['modifyRequestUrl','modifyRequestHeader','modifyRequestBody','redirect','cancel','delay'];
+  var REQ = ['modifyRequestUrl','modifyRequestHeader','modifyRequestBody','redirect','cancel','delay','injectScript'];
   var RESP = ['modifyResponseHeader','modifyResponseBody','modifyStatusCode'];
 
-  function applyReq(url, hdrs, body, actions) { var u = url, b = body, h = {}; for (var k in hdrs) h[k] = hdrs[k]; var cancelled = false; var delayMs = 0; for (var i = 0; i < actions.length; i++) { var a = actions[i]; switch (a.type) { case 'modifyRequestUrl': if (a.operate === 'replace') { var re = safeRe(a.key, 'g'); if (re) u = u.replace(re, a.value); } else if (a.operate === 'set') u = a.value; else if (a.operate === 'remove') { var re2 = safeRe('[?&]' + a.key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '=[^&]*', 'g'); if (re2) u = u.replace(re2, ''); } break; case 'modifyRequestHeader': if (a.operate === 'set') h[a.key] = a.value; else if (a.operate === 'append') h[a.key] = (h[a.key] ? h[a.key] + ', ' : '') + a.value; else if (a.operate === 'remove') { var re3 = safeRe(a.key, 'i'); if (re3) { var ks = Object.keys(h); for (var j = 0; j < ks.length; j++) { if (re3.test(ks[j])) delete h[ks[j]]; } } } else if (a.operate === 'replace') { var re4 = safeRe(a.key, 'i'); if (re4) { var ks2 = Object.keys(h); for (var j2 = 0; j2 < ks2.length; j2++) { if (re4.test(ks2[j2])) h[ks2[j2]] = a.value; } } } break; case 'modifyRequestBody': if (b !== undefined) { if (a.operate === 'replace') { var re5 = safeRe(a.key, 'g'); if (re5) b = b.replace(re5, a.value); } else if (a.operate === 'set') b = a.value; } break; case 'redirect': if (a.operate === 'set') u = a.value; break; case 'cancel': cancelled = true; break; case 'delay': delayMs = Math.max(delayMs, parseInt(a.value) || 0); break; } } return { url: u, headers: h, body: b, cancelled: cancelled, delayMs: delayMs }; }
+  function trunc(s, n) { return s && s.length > n ? s.slice(0, n) : s; }
+  function postLog(entry) { try { window.postMessage({ type: 'APII_LOG', entry: entry }, '*'); } catch (_) {} }
+
+  function applyReq(url, hdrs, body, actions) { var u = url, b = body, h = {}; for (var k in hdrs) h[k] = hdrs[k]; var cancelled = false; var delayMs = 0; for (var i = 0; i < actions.length; i++) { var a = actions[i]; switch (a.type) { case 'modifyRequestUrl': if (a.operate === 'replace') { var re = safeRe(a.key, 'g'); if (re) u = u.replace(re, a.value); } else if (a.operate === 'set') u = a.value; else if (a.operate === 'remove') { var re2 = safeRe('[?&]' + a.key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '=[^&]*', 'g'); if (re2) u = u.replace(re2, ''); } break; case 'modifyRequestHeader': if (a.operate === 'set') h[a.key] = a.value; else if (a.operate === 'append') h[a.key] = (h[a.key] ? h[a.key] + ', ' : '') + a.value; else if (a.operate === 'remove') { var re3 = safeRe(a.key, 'i'); if (re3) { var ks = Object.keys(h); for (var j = 0; j < ks.length; j++) { if (re3.test(ks[j])) delete h[ks[j]]; } } } else if (a.operate === 'replace') { var re4 = safeRe(a.key, 'i'); if (re4) { var ks2 = Object.keys(h); for (var j2 = 0; j2 < ks2.length; j2++) { if (re4.test(ks2[j2])) h[ks2[j2]] = a.value; } } } break; case 'modifyRequestBody': if (b !== undefined) { if (a.operate === 'replace') { var re5 = safeRe(a.key, 'g'); if (re5) b = b.replace(re5, a.value); } else if (a.operate === 'set') b = a.value; } break; case 'redirect': if (a.operate === 'set') u = a.value; break; case 'cancel': cancelled = true; break; case 'delay': delayMs = Math.max(delayMs, parseInt(a.value) || 0); break; case 'injectScript': try { var _ctx = { url: u, headers: h, body: b }; new Function('ctx', a.value)(_ctx); u = _ctx.url; b = _ctx.body; } catch (err) { console.error('[ApiMockFlow] injectScript error:', err); } break; } } return { url: u, headers: h, body: b, cancelled: cancelled, delayMs: delayMs }; }
 
   function applyResp(status, statusText, hdrs, body, actions) { var s = status, st = statusText, b = body, h = {}; for (var k in hdrs) h[k] = hdrs[k]; var bodyChanged = false; for (var i = 0; i < actions.length; i++) { var a = actions[i]; switch (a.type) { case 'modifyResponseHeader': if (a.operate === 'set') h[a.key] = a.value; else if (a.operate === 'append') h[a.key] = (h[a.key] ? h[a.key] + ', ' : '') + a.value; else if (a.operate === 'remove') { var re = safeRe(a.key, 'i'); if (re) { var ks = Object.keys(h); for (var j = 0; j < ks.length; j++) { if (re.test(ks[j])) delete h[ks[j]]; } } } else if (a.operate === 'replace') { var re2 = safeRe(a.key, 'i'); if (re2) { var ks2 = Object.keys(h); for (var j2 = 0; j2 < ks2.length; j2++) { if (re2.test(ks2[j2])) h[ks2[j2]] = a.value; } } } break; case 'modifyResponseBody': if (a.operate === 'replace') { var re3 = safeRe(a.key, 'g'); if (re3) b = b.replace(re3, a.value); bodyChanged = true; } else if (a.operate === 'set') { b = a.value; bodyChanged = true; } break; case 'modifyStatusCode': if (a.operate === 'set') { var c = parseInt(a.value); if (!isNaN(c) && c >= 100 && c <= 599) { s = c; st = (c >= 200 && c < 300) ? 'OK' : ''; } } break; } } if (bodyChanged) { delete h['content-length']; delete h['content-encoding']; var ct = h['content-type']; if (ct && ct.indexOf('charset') === -1) h['content-type'] = ct + '; charset=utf-8'; } return { status: s, statusText: st, headers: h, body: b }; }
 
@@ -66,9 +70,13 @@
     var respA = allA.filter(function (a) { return RESP.indexOf(a.type) >= 0; });
     var origH = init && init.headers ? hdrRec(init.headers instanceof Headers ? init.headers : new Headers(init.headers)) : {};
     var origB = init && init.body ? (init.body instanceof ReadableStream ? undefined : init.body.toString()) : undefined;
+    var origUrl = url;
+    var origReq = { headers: origH, body: trunc(origB, 2000) };
     var rm = applyReq(url, origH, origB, reqA);
+    var modReq = { url: rm.url, headers: rm.headers, body: trunc(rm.body, 2000) };
 
     if (rm.cancelled) {
+      postLog({ id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6), timestamp: Date.now(), url: origUrl, method: method, ruleIds: rules.map(function(r){return r.id;}), ruleNames: rules.map(function(r){return r.name;}), originalRequest: origReq, modifiedRequest: modReq, originalResponse: undefined, modifiedResponse: undefined, cancelled: true, delayed: false, delayMs: 0 });
       return new Response(null, { status: 403, statusText: 'Blocked' });
     }
 
@@ -83,11 +91,14 @@
     return NATIVE_FETCH(input, ni).then(function (resp) {
       if (respA.length > 0) {
         return resp.text().then(function (rb) {
+          var origResp = { status: resp.status, statusText: resp.statusText, headers: hdrRec(resp.headers), body: trunc(rb, 2000) };
           var rmod = applyResp(resp.status, resp.statusText, hdrRec(resp.headers), rb, respA);
           console.log('[ApiMockFlow] Response modified:', method, url, 'status', resp.status, '→', rmod.status, 'body', rb.length, '→', rmod.body.length);
+          postLog({ id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6), timestamp: Date.now(), url: origUrl, method: method, ruleIds: rules.map(function(r){return r.id;}), ruleNames: rules.map(function(r){return r.name;}), originalRequest: origReq, modifiedRequest: modReq, originalResponse: origResp, modifiedResponse: { status: rmod.status, statusText: rmod.statusText, headers: rmod.headers, body: trunc(rmod.body, 2000) }, cancelled: false, delayed: rm.delayMs > 0, delayMs: rm.delayMs });
           return new Response(rmod.body, { status: rmod.status, statusText: rmod.statusText, headers: rmod.headers });
         });
       }
+      postLog({ id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6), timestamp: Date.now(), url: origUrl, method: method, ruleIds: rules.map(function(r){return r.id;}), ruleNames: rules.map(function(r){return r.name;}), originalRequest: origReq, modifiedRequest: modReq, originalResponse: undefined, modifiedResponse: undefined, cancelled: false, delayed: rm.delayMs > 0, delayMs: rm.delayMs });
       return resp;
     }).catch(function (err) { console.error('[ApiMockFlow] fetch error:', err); return NATIVE_FETCH(input, init); });
   }
@@ -115,14 +126,23 @@
       var allA = []; for (var i = 0; i < rules.length; i++) allA = allA.concat(rules[i].actions);
       var reqA = allA.filter(function (a) { return REQ.indexOf(a.type) >= 0; });
       var respA = allA.filter(function (a) { return RESP.indexOf(a.type) >= 0; });
+      var xhrOrigReq = { headers: orh, body: trunc(ob, 2000) };
       var rm = applyReq(ou, orh, ob, reqA);
+      var xhrModReq = { url: rm.url, headers: rm.headers, body: trunc(rm.body, 2000) };
+      var xhrRuleIds = rules.map(function(r){return r.id;});
+      var xhrRuleNames = rules.map(function(r){return r.name;});
+
+      function xhrLog(origResp, modResp, cancelled) {
+        postLog({ id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6), timestamp: Date.now(), url: ou, method: om, ruleIds: xhrRuleIds, ruleNames: xhrRuleNames, originalRequest: xhrOrigReq, modifiedRequest: xhrModReq, originalResponse: origResp || undefined, modifiedResponse: modResp || undefined, cancelled: !!cancelled, delayed: rm.delayMs > 0, delayMs: rm.delayMs });
+      }
 
       function doXHRSend() {
-        if (rm.cancelled) { try{Object.defineProperty(self,'status',{value:403});Object.defineProperty(self,'statusText',{value:'Blocked'});Object.defineProperty(self,'responseText',{value:''});Object.defineProperty(self,'response',{value:''});Object.defineProperty(self,'readyState',{value:4});}catch(_){} setTimeout(function(){self.dispatchEvent(new Event('load'));},0); return; }
+        if (rm.cancelled) { try{Object.defineProperty(self,'status',{value:403});Object.defineProperty(self,'statusText',{value:'Blocked'});Object.defineProperty(self,'responseText',{value:''});Object.defineProperty(self,'response',{value:''});Object.defineProperty(self,'readyState',{value:4});}catch(_){} xhrLog(null, null, true); setTimeout(function(){self.dispatchEvent(new Event('load'));},0); return; }
         var hk = Object.keys(rm.headers); for (var i2 = 0; i2 < hk.length; i2++) { try { _XHR_setRH.call(self, hk[i2], rm.headers[hk[i2]]); } catch (_) {} }
-        if (rm.url !== ou) { var px = new NATIVE_XHR(); px.open(om, rm.url, true); var hk2 = Object.keys(rm.headers); for (var i3 = 0; i3 < hk2.length; i3++) { try { px.setRequestHeader(hk2[i3], rm.headers[hk2[i3]]); } catch (_) {} } px.onreadystatechange = function () { if (px.readyState === 4 && !self._xrm) { self._xrm = true; var rb = px.responseText || ''; var rh = parseHdr(px.getAllResponseHeaders()); if (respA.length > 0) { var rmod = applyResp(px.status, px.statusText, rh, rb, respA); try{Object.defineProperty(self,'status',{value:rmod.status});Object.defineProperty(self,'statusText',{value:rmod.statusText});Object.defineProperty(self,'responseText',{value:rmod.body});Object.defineProperty(self,'response',{value:rmod.body});self.getResponseHeader=function(n){for(var k2 in rmod.headers){if(k2.toLowerCase()===n.toLowerCase())return rmod.headers[k2];}return null;};self.getAllResponseHeaders=function(){return Object.keys(rmod.headers).map(function(k2){return k2+': '+rmod.headers[k2];}).join('\r\n');};}catch(_){} } try{Object.defineProperty(self,'readyState',{value:4});}catch(_){} self.dispatchEvent(new Event('readystatechange')); self.dispatchEvent(new Event('load')); if (px.status >= 400) self.dispatchEvent(new Event('error')); } }; px.send(rm.body !== undefined ? rm.body : body); return; }
-        if (respA.length > 0) { self.addEventListener('readystatechange', function h() { if (self.readyState === 4 && !self._xrm) { self._xrm = true; self.removeEventListener('readystatechange', h); var rb = self.responseText || ''; var rh = parseHdr(oGAH.call(self)); var os = self.status, ot = self.statusText; var rmod = applyResp(os, ot, rh, rb, respA); console.log('[ApiMockFlow] XHR Response modified:', om, ou, 'status', os, '→', rmod.status, 'bodyLen', rb.length, '→', rmod.body.length); 
-try{Object.defineProperty(self,'status',{value:rmod.status});Object.defineProperty(self,'statusText',{value:rmod.statusText});Object.defineProperty(self,'responseText',{value:rmod.body});Object.defineProperty(self,'response',{value:rmod.body});self.getResponseHeader=function(n){for(var k2 in rmod.headers){if(k2.toLowerCase()===n.toLowerCase())return rmod.headers[k2];}return null;};self.getAllResponseHeaders=function(){return Object.keys(rmod.headers).map(function(k2){return k2+': '+rmod.headers[k2];}).join('\r\n');};}catch(_){} } }); return _XHR_send.call(self, rm.body !== undefined ? rm.body : body); }
+        if (rm.url !== ou) { var px = new NATIVE_XHR(); px.open(om, rm.url, true); var hk2 = Object.keys(rm.headers); for (var i3 = 0; i3 < hk2.length; i3++) { try { px.setRequestHeader(hk2[i3], rm.headers[hk2[i3]]); } catch (_) {} } px.onreadystatechange = function () { if (px.readyState === 4 && !self._xrm) { self._xrm = true; var rb = px.responseText || ''; var rh = parseHdr(px.getAllResponseHeaders()); var xhrOrigResp = { status: px.status, statusText: px.statusText, headers: rh, body: trunc(rb, 2000) }; if (respA.length > 0) { var rmod = applyResp(px.status, px.statusText, rh, rb, respA); try{Object.defineProperty(self,'status',{value:rmod.status});Object.defineProperty(self,'statusText',{value:rmod.statusText});Object.defineProperty(self,'responseText',{value:rmod.body});Object.defineProperty(self,'response',{value:rmod.body});self.getResponseHeader=function(n){for(var k2 in rmod.headers){if(k2.toLowerCase()===n.toLowerCase())return rmod.headers[k2];}return null;};self.getAllResponseHeaders=function(){return Object.keys(rmod.headers).map(function(k2){return k2+': '+rmod.headers[k2];}).join('\r\n');};}catch(_){} xhrLog(xhrOrigResp, { status: rmod.status, statusText: rmod.statusText, headers: rmod.headers, body: trunc(rmod.body, 2000) }); } else { xhrLog(xhrOrigResp, null); } try{Object.defineProperty(self,'readyState',{value:4});}catch(_){} self.dispatchEvent(new Event('readystatechange')); self.dispatchEvent(new Event('load')); if (px.status >= 400) self.dispatchEvent(new Event('error')); } }; px.send(rm.body !== undefined ? rm.body : body); return; }
+        if (respA.length > 0) { self.addEventListener('readystatechange', function h() { if (self.readyState === 4 && !self._xrm) { self._xrm = true; self.removeEventListener('readystatechange', h); var rb = self.responseText || ''; var rh = parseHdr(oGAH.call(self)); var os = self.status, ot = self.statusText; var xhrOrigResp2 = { status: os, statusText: ot, headers: rh, body: trunc(rb, 2000) }; var rmod = applyResp(os, ot, rh, rb, respA); console.log('[ApiMockFlow] XHR Response modified:', om, ou, 'status', os, '→', rmod.status, 'bodyLen', rb.length, '→', rmod.body.length);
+try{Object.defineProperty(self,'status',{value:rmod.status});Object.defineProperty(self,'statusText',{value:rmod.statusText});Object.defineProperty(self,'responseText',{value:rmod.body});Object.defineProperty(self,'response',{value:rmod.body});self.getResponseHeader=function(n){for(var k2 in rmod.headers){if(k2.toLowerCase()===n.toLowerCase())return rmod.headers[k2];}return null;};self.getAllResponseHeaders=function(){return Object.keys(rmod.headers).map(function(k2){return k2+': '+rmod.headers[k2];}).join('\r\n');};}catch(_){} xhrLog(xhrOrigResp2, { status: rmod.status, statusText: rmod.statusText, headers: rmod.headers, body: trunc(rmod.body, 2000) }); } }); return _XHR_send.call(self, rm.body !== undefined ? rm.body : body); }
+        xhrLog(null, null);
         return _XHR_send.call(self, rm.body !== undefined ? rm.body : body);
       }
 
@@ -178,4 +198,4 @@ try{Object.defineProperty(self,'status',{value:rmod.status});Object.defineProper
   window.postMessage({ type: 'APII_READY' }, '*');
   setInterval(function () { window.postMessage({ type: 'APII_RCOUNT', count: _reqCount }, '*'); }, 2000);
   console.log('[ApiMockFlow] Main-world interceptor ready');
-})();
+})(); } // end __APII_INIT guard

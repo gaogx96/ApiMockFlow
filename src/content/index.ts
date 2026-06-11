@@ -1,4 +1,6 @@
 // Content script — state sync + log bridge
+if ((window as any).__apimockflow_loaded) { /* already injected, skip */ } else {
+(window as any).__apimockflow_loaded = true;
 
 var badge = document.createElement('div');
 badge.id = 'apimockflow-badge';
@@ -22,11 +24,16 @@ function updateBadge(active: boolean, count: number, reqCount?: number) {
   }
 }
 
-// Listen for request counts from interceptor
+// Listen for messages from interceptor
 window.addEventListener('message', function (e) {
   if (e.source !== window || !e.data) return;
   if (e.data.type === 'APII_RCOUNT') {
     updateBadge(badgeActive, lastRuleCount, e.data.count);
+  }
+  if (e.data.type === 'APII_LOG' && e.data.entry) {
+    try {
+      chrome.runtime.sendMessage({ type: 'LOG_SAVE', payload: e.data.entry });
+    } catch (_) {}
   }
 });
 
@@ -91,3 +98,4 @@ chrome.storage.onChanged.addListener(function (changes, area) {
 });
 
 console.log('[ApiMockFlow] Content script loaded');
+} // end __apimockflow_loaded guard

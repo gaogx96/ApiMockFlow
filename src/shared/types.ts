@@ -20,7 +20,8 @@ export type ActionType =
   | 'modifyStatusCode'
   | 'redirect'
   | 'cancel'
-  | 'delay';
+  | 'delay'
+  | 'injectScript';
 
 export type OperateType = 'set' | 'append' | 'remove' | 'replace';
 
@@ -61,6 +62,24 @@ export interface AppState {
   groups: RuleGroup[];
 }
 
+// ==================== 拦截日志 ====================
+
+export interface InterceptedRequest {
+  id: string;
+  timestamp: number;
+  url: string;
+  method: string;
+  ruleIds: string[];
+  ruleNames: string[];
+  originalRequest: { headers: Record<string, string>; body?: string };
+  modifiedRequest: { url: string; headers: Record<string, string>; body?: string };
+  originalResponse?: { status: number; statusText: string; headers: Record<string, string>; body: string };
+  modifiedResponse?: { status: number; statusText: string; headers: Record<string, string>; body: string };
+  cancelled: boolean;
+  delayed: boolean;
+  delayMs: number;
+}
+
 // ==================== 消息通信 ====================
 
 export type MessageType =
@@ -81,7 +100,10 @@ export type MessageType =
   | 'API_TEST_HISTORY_CLEAR'
   | 'API_SAVED_GET'
   | 'API_SAVED_SAVE'
-  | 'API_SAVED_DELETE';
+  | 'API_SAVED_DELETE'
+  | 'LOG_SAVE'
+  | 'LOG_GET'
+  | 'LOG_CLEAR';
 
 export interface ExtensionMessage {
   type: MessageType;
@@ -100,6 +122,7 @@ export const ACTION_TYPE_LABELS: Record<ActionType, string> = {
   redirect: '重定向请求',
   cancel: '拦截请求',
   delay: '延迟响应',
+  injectScript: '注入脚本',
 };
 
 export const OPERATE_TYPE_LABELS: Record<OperateType, string> = {
