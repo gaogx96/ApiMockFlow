@@ -60,13 +60,15 @@ export default function ApiTester({ onCreateRule }: Props) {
 
   function loadHistory() {
     chrome.runtime.sendMessage({ type: 'API_TEST_HISTORY_GET' }, (resp) => {
-      if (resp) setHistory(resp);
+      if (chrome.runtime.lastError || !resp) return;
+      setHistory(resp);
     });
   }
 
   function loadSaved() {
     chrome.runtime.sendMessage({ type: 'API_SAVED_GET' }, (resp) => {
-      if (resp) setSaved(resp);
+      if (chrome.runtime.lastError || !resp) return;
+      setSaved(resp);
     });
   }
 
@@ -136,18 +138,17 @@ export default function ApiTester({ onCreateRule }: Props) {
   }
 
   function addTab(name?: string) {
-    setTabs(prev => [...prev, createTab(name)]);
-    setActiveIdx(tabs.length);
+    setTabs(prev => {
+      setActiveIdx(prev.length);
+      return [...prev, createTab(name)];
+    });
   }
 
   function closeTab(idx: number) {
     if (tabs.length <= 1) return;
-    setTabs(prev => {
-      const next = prev.filter((_, i) => i !== idx);
-      if (activeIdx >= idx && activeIdx > 0) setActiveIdx(activeIdx - 1);
-      else if (activeIdx > next.length - 1) setActiveIdx(next.length - 1);
-      return next;
-    });
+    if (activeIdx >= idx && activeIdx > 0) setActiveIdx(activeIdx - 1);
+    else if (activeIdx > tabs.length - 2) setActiveIdx(Math.max(0, tabs.length - 2));
+    setTabs(prev => prev.filter((_, i) => i !== idx));
   }
 
   function handleImport() {
@@ -205,6 +206,27 @@ export default function ApiTester({ onCreateRule }: Props) {
 
   function formatJson(s: string): string {
     try { return JSON.stringify(JSON.parse(s), null, 2); } catch { return s; }
+  }
+
+  // Simple regex-based JSON syntax highlighting (safe: input is from JSON.stringify)
+  function highlightJson(s: string): string {
+    let formatted: string;
+    try { formatted = JSON.stringify(JSON.parse(s), null, 2); } catch { formatted = s; }
+    // Escape HTML first
+    const esc = formatted.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    // Highlight: strings, numbers, booleans, null, keys
+    return esc
+      .replace(/"([^"\\]|\\.)*"/g, (m) => {
+        // Check if it's a key (followed by :)
+        return `<span style="color:#9cdcfe">${m}</span>`;
+      })
+      .replace(/\b(true|false)\b/g, '<span style="color:#569cd6">$1</span>')
+      .replace(/\b(null)\b/g, '<span style="color:#569cd6">$1</span>')
+      .replace(/\b(-?\d+\.?\d*([eE][+-]?\d+)?)\b/g, '<span style="color:#b5cea8">$1</span>');
+  }
+
+  function copyToClipboard(text: string) {
+    navigator.clipboard.writeText(text).catch(() => {});
   }
 
   function formatSize(bytes: number): string {
@@ -392,7 +414,7 @@ export default function ApiTester({ onCreateRule }: Props) {
             {tab.response && (
               <div className="space-y-2">
                 <div className="flex items-center gap-2 text-xs text-gray-500" style={{ fontSize: 11 }}>
-                  <span className={`font-bold ${tab.response.status < 400 ? 'text-green-600' : 'text-red-600'}`}>
+                  <span className={`font-bold ${tab.response.status < 300 ? 'text-green-600' : tab.response.status < 400 ? 'text-amber-600' : 'text-red-600'}`}>
                     {tab.response.status} {tab.response.statusText}
                   </span>
                   <span>{tab.response.duration}ms</span>
@@ -409,10 +431,22 @@ export default function ApiTester({ onCreateRule }: Props) {
                   </div>
                 </details>
                 <div>
-                  <div className="text-xs font-medium text-gray-600 mb-0.5" style={{ fontSize: 11 }}>响应体</div>
-                  <pre className="bg-gray-50 dark:bg-slate-900 rounded p-1.5 text-xs max-h-44 overflow-y-auto whitespace-pre-wrap break-all" style={{ fontSize: 10 }}>
-                    {formatJson(tab.response.body)}
-                  </pre>
+                  <div className="flex items-center justify-between mb-0.5">
+                    <div className="text-xs font-medium text-gray-600" style={{ fontSize: 11 }}>响应体</div>
+                    <button
+                      onClick={() => copyToClipboard(formatJson(tab.response!.body))}
+                      className="text-xs text-gray-400 hover:text-gray-600 dark:hover:text-gray-300"
+                      style={{ fontSize: 10 }}
+                      title="复制"
+                    >
+                      复制
+                    </button>
+                  </div>
+                  <pre
+                    className="bg-gray-50 dark:bg-slate-900 rounded p-1.5 text-xs max-h-64 overflow-y-auto whitespace-pre-wrap break-all"
+                    style={{ fontSize: 10, fontFamily: "'SF Mono', 'Fira Code', Consolas, monospace" }}
+                    dangerouslySetInnerHTML={{ __html: highlightJson(tab.response.body.length > 50000 ? tab.response.body.slice(0, 50000) + '\n\n... (已截断，共 ' + formatSize(tab.response.body.length) + ')' : tab.response.body) }}
+                  />
                 </div>
               </div>
             )}
@@ -445,7 +479,7 @@ export default function ApiTester({ onCreateRule }: Props) {
                     <span className={`method-badge method-${item.request.method}`} style={{ fontSize: 9 }}>{item.request.method}</span>
                     <span className="text-xs text-gray-500 truncate flex-1" style={{ fontSize: 10 }}>{item.request.url}</span>
                     {item.response && (
-                      <span className={`text-xs font-mono ${item.response.status < 400 ? 'text-green-500' : 'text-red-500'}`} style={{ fontSize: 10 }}>
+                      <span className={`text-xs font-mono ${item.response.status < 300 ? 'text-green-500' : item.response.status < 400 ? 'text-amber-500' : 'text-red-500'}`} style={{ fontSize: 10 }}>
                         {item.response.status}
                       </span>
                     )}

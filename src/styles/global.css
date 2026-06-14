@@ -2,12 +2,6 @@
 @tailwind components;
 @tailwind utilities;
 
-* {
-  margin: 0;
-  padding: 0;
-  box-sizing: border-box;
-}
-
 body {
   width: 640px;
   min-height: 480px;
@@ -69,14 +63,14 @@ html.dark .tab-bar {
   font-size: 12px;
   font-weight: 500;
   color: #64748b;
-  transition: all 0.15s ease;
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
   white-space: nowrap;
 }
 .tab-item:hover { background: #f1f5f9; color: #334155; }
-.tab-item.active { background: #eff6ff; color: #3b82f6; font-weight: 600; }
+.tab-item.active { background: #eff6ff; color: #3b82f6; font-weight: 600; border-bottom: 2px solid #3b82f6; }
 html.dark .tab-item { color: #94a3b8; }
 html.dark .tab-item:hover { background: #334155; color: #e2e8f0; }
-html.dark .tab-item.active { background: #1e3a5f; color: #60a5fa; }
+html.dark .tab-item.active { background: #1e3a5f; color: #60a5fa; border-bottom-color: #60a5fa; }
 
 /* ========== Status Bar ========== */
 .status-bar {
@@ -104,6 +98,7 @@ html.dark .status-bar {
   cursor: pointer;
   transition: background 0.2s ease;
   flex-shrink: 0;
+  will-change: background;
 }
 .toggle-switch.active { background: #3b82f6; }
 .toggle-switch::after {
@@ -116,6 +111,7 @@ html.dark .status-bar {
   background: white;
   border-radius: 50%;
   transition: transform 0.2s ease;
+  will-change: transform;
   box-shadow: 0 1px 3px rgba(0,0,0,0.15);
 }
 .toggle-switch.active::after { transform: translateX(16px); }
@@ -152,7 +148,7 @@ html.dark .status-bar {
   font-size: 13px;
   font-weight: 500;
   cursor: pointer;
-  transition: all 0.15s ease;
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
 }
 .btn-secondary:hover { background: #f9fafb; border-color: #9ca3af; }
 html.dark .btn-secondary { background: #1e293b; color: #e2e8f0; border-color: #334155; }
@@ -166,7 +162,7 @@ html.dark .btn-secondary:hover { background: #334155; border-color: #475569; }
   border-radius: 4px;
   font-size: 12px;
   cursor: pointer;
-  transition: all 0.15s ease;
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
 }
 .btn-ghost:hover { background: #f1f5f9; color: #374151; }
 html.dark .btn-ghost { color: #94a3b8; }
@@ -237,10 +233,10 @@ html.dark .form-label { color: #cbd5e1; }
 .tag-red { background: #fef2f2; color: #dc2626; }
 .tag-amber { background: #fffbeb; color: #d97706; }
 html.dark .tag-blue { background: #1e3a5f; color: #60a5fa; }
-html.dark .tag-green { background: #1e3a5f; color: #60a5fa; }
+html.dark .tag-green { background: #134e4a; color: #5eead4; }
 html.dark .tag-gray { background: #334155; color: #94a3b8; }
 html.dark .tag-red { background: #451a03; color: #fbbf24; }
-html.dark .tag-amber { background: #451a03; color: #fbbf24; }
+html.dark .tag-amber { background: #422006; color: #f59e0b; }
 
 /* ========== Method badges ========== */
 .method-badge {
@@ -259,9 +255,9 @@ html.dark .tag-amber { background: #451a03; color: #fbbf24; }
 .method-DELETE { background: #fef2f2; color: #dc2626; }
 .method-PATCH { background: #faf5ff; color: #7c3aed; }
 html.dark .method-GET { background: #1e3a5f; color: #60a5fa; }
-html.dark .method-POST { background: #1e3a5f; color: #60a5fa; }
+html.dark .method-POST { background: #134e4a; color: #5eead4; }
 html.dark .method-PUT { background: #451a03; color: #fbbf24; }
-html.dark .method-DELETE { background: #451a03; color: #fbbf24; }
+html.dark .method-DELETE { background: #422006; color: #f59e0b; }
 html.dark .method-PATCH { background: #2e1065; color: #a78bfa; }
 
 /* ========== Rule list hover actions ========== */
@@ -282,3 +278,21 @@ div:hover > .rule-hover-actions { opacity: 1; }
 .empty-state .desc { font-size: 12px; color: #94a3b8; }
 html.dark .empty-state .title { color: #94a3b8; }
 html.dark .empty-state .desc { color: #475569; }
+
+/* ========== Accessibility: reduced motion ========== */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* ========== Focus-visible: keyboard-only focus rings ========== */
+.form-input:focus-visible, .form-select:focus-visible, .form-textarea:focus-visible {
+  border-color: #3b82f6;
+  box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.12);
+}
+.form-input:focus:not(:focus-visible), .form-select:focus:not(:focus-visible), .form-textarea:focus:not(:focus-visible) {
+  box-shadow: none;
+}

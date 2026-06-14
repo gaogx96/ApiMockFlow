@@ -16,9 +16,15 @@ storageGet('globalEnabled', true).then(setIcon);
 // Inject interceptor into all existing tabs (for "use without refresh")
 function injectAllTabs() {
   chrome.tabs.query({}, (tabs) => {
-    for (const tab of tabs) {
-      if (!tab.id || !tab.url || tab.url.startsWith('chrome://') || tab.url.startsWith('chrome-extension://')) continue;
-      chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['content.js'] }).catch(() => {});
+    const eligible = tabs.filter(t => t.id && t.url && !t.url.startsWith('chrome://') && !t.url.startsWith('chrome-extension://'));
+    // Batch inject: 10 tabs at a time, 100ms apart
+    const BATCH = 10;
+    for (let i = 0; i < eligible.length; i += BATCH) {
+      setTimeout(() => {
+        eligible.slice(i, i + BATCH).forEach(tab => {
+          chrome.scripting.executeScript({ target: { tabId: tab.id! }, files: ['content.js'] }).catch(() => {});
+        });
+      }, Math.floor(i / BATCH) * 100);
     }
   });
 }
@@ -78,9 +84,8 @@ chrome.runtime.onMessage.addListener((msg: any, _sender: any, sendResponse: any)
   const t = msg.type;
 
   if (t === 'GET_MATCHING_RULES') {
-    const { url, method, resourceType } = msg.payload;
+    const { url = '', method = '', resourceType = '' } = msg.payload || {};
     getMatching(url, method, resourceType).then(rules => {
-      console.log('[ApiMockFlow] Matched', rules.length, 'rules');
       sendResponse({ rules });
     });
     return true;
@@ -101,6 +106,17 @@ chrome.runtime.onMessage.addListener((msg: any, _sender: any, sendResponse: any)
 
   if (t === 'GET_RULES') { storageGet('rules', []).then(sendResponse); return true; }
   if (t === 'SAVE_RULES') { storageSet('rules', msg.payload).then(() => sendResponse({ success: true })); return true; }
+  if (t === 'UPSERT_RULE') {
+    if (!msg.payload?.id) { sendResponse({ success: false, error: 'Invalid rule: missing id' }); return true; }
+    storageGet<Rule[]>('rules', []).then(rules => {
+      const idx = rules.findIndex(r => r.id === msg.payload.id);
+      if (idx >= 0) rules[idx] = msg.payload;
+      else rules.push(msg.payload);
+      return storageSet('rules', rules);
+    }).then(() => sendResponse({ success: true }))
+      .catch((err: any) => sendResponse({ success: false, error: err?.message || 'unknown' }));
+    return true;
+  }
   if (t === 'SAVE_GROUPS') {
     var gs: RuleGroup[] = msg.payload;
     if (!Array.isArray(gs) || gs.length === 0) {
@@ -110,8 +126,10 @@ chrome.runtime.onMessage.addListener((msg: any, _sender: any, sendResponse: any)
     return true;
   }
   if (t === 'DELETE_RULE') {
+    const deleteId = msg.payload?.id;
+    if (!deleteId) { sendResponse({ success: false, error: 'Missing rule id' }); return true; }
     storageGet<Rule[]>('rules', []).then(rules => {
-      storageSet('rules', rules.filter(r => r.id !== msg.payload.id)).then(() => sendResponse({ success: true }));
+      storageSet('rules', rules.filter(r => r.id !== deleteId)).then(() => sendResponse({ success: true }));
     });
     return true;
   }
@@ -126,7 +144,8 @@ chrome.runtime.onMessage.addListener((msg: any, _sender: any, sendResponse: any)
   }
 
   if (t === 'TOGGLE_RULE') {
-    const { ruleId, enabled } = msg.payload;
+    const { ruleId, enabled } = msg.payload || {};
+    if (!ruleId) { sendResponse({ success: false, error: 'Missing ruleId' }); return true; }
     storageGet<Rule[]>('rules', []).then(rules => {
       const r = rules.find(x => x.id === ruleId);
       if (r) { r.enabled = enabled; storageSet('rules', rules).then(() => sendResponse({ success: true })); }
@@ -136,7 +155,7 @@ chrome.runtime.onMessage.addListener((msg: any, _sender: any, sendResponse: any)
   }
 
   if (t === 'TOGGLE_GROUP') {
-    const { groupId, enabled } = msg.payload;
+    const { groupId, enabled } = msg.payload || {};
     storageGet<RuleGroup[]>('groups', []).then(groups => {
       const g = groups.find(x => x.id === groupId);
       if (g) { g.enabled = enabled; storageSet('groups', groups).then(() => sendResponse({ success: true })); }
@@ -154,10 +173,23 @@ chrome.runtime.onMessage.addListener((msg: any, _sender: any, sendResponse: any)
   if (t === 'IMPORT_RULES') {
     try {
       const d = JSON.parse(msg.payload);
+      if (!d.rules && !d.groups) {
+        sendResponse({ success: false, error: '文件中没有找到规则或分组数据' });
+        return true;
+      }
       const ps: Promise<void>[] = [];
-      if (d.rules && Array.isArray(d.rules)) ps.push(storageSet('rules', d.rules));
+      if (d.rules && Array.isArray(d.rules)) {
+        // Validate and sanitize rules
+        const validRules = d.rules.filter((r: any) => r && r.id && r.name && r.match && Array.isArray(r.actions));
+        // Strip injectScript actions from imported rules for security
+        for (const rule of validRules) {
+          rule.actions = rule.actions.filter((a: any) => a && a.type && a.type !== 'injectScript');
+        }
+        ps.push(storageSet('rules', validRules));
+      }
       if (d.groups && Array.isArray(d.groups) && d.groups.length > 0) {
-        ps.push(storageSet('groups', d.groups));
+        const validGroups = d.groups.filter((g: any) => g && g.id && g.name);
+        ps.push(storageSet('groups', validGroups));
       }
       Promise.all(ps).then(() => sendResponse({ success: true }));
     } catch { sendResponse({ success: false, error: 'Invalid JSON' }); }
@@ -166,7 +198,21 @@ chrome.runtime.onMessage.addListener((msg: any, _sender: any, sendResponse: any)
 
   // ---- API Tester: proxy request (bypasses CORS) ----
   if (t === 'API_TEST_REQUEST') {
-    const { method, url, headers, body } = msg.payload as { method: string; url: string; headers: Record<string, string>; body?: string };
+    const { method = 'GET', url = '', headers = {}, body } = (msg.payload || {}) as { method: string; url: string; headers: Record<string, string>; body?: string };
+    if (!url || !/^https?:\/\//i.test(url)) {
+      sendResponse({ error: '仅支持 http:// 和 https:// 协议' });
+      return false;
+    }
+    // SSRF protection: block private/internal IPs
+    try {
+      const parsedUrl = new URL(url);
+      const host = parsedUrl.hostname.replace(/^\[|\]$/g, ''); // strip IPv6 brackets
+      const blocked = ['127.0.0.1', '0.0.0.0', '169.254.169.254', 'localhost', '::1', '::ffff:127.0.0.1'];
+      if (blocked.includes(host) || /^10\./.test(host) || /^192\.168\./.test(host) || /^172\.(1[6-9]|2\d|3[01])\./.test(host) || /^fe80:/i.test(host) || /^f[cd]/i.test(host)) {
+        sendResponse({ error: '不允许访问内网地址' });
+        return false;
+      }
+    } catch (_) {}
     const start = Date.now();
 
     async function doRequest() {
@@ -196,18 +242,20 @@ chrome.runtime.onMessage.addListener((msg: any, _sender: any, sendResponse: any)
       try {
         const resp = await fetch(url, init);
         clearTimeout(tm);
+        const contentLength = resp.headers.get('content-length');
         const respBody = await resp.text();
         const respHdrs: Record<string, string> = {};
         resp.headers.forEach((v, k) => { respHdrs[k] = v; });
         sendResponse({
           status: resp.status, statusText: resp.statusText,
           headers: respHdrs, body: respBody.slice(0, 100000),
-          duration: Date.now() - start, size: new Blob([respBody]).size,
+          duration: Date.now() - start,
+          size: contentLength ? parseInt(contentLength, 10) : respBody.length,
         });
       } catch (err: unknown) {
         clearTimeout(tm);
-        const msg = (err as Error).name === 'AbortError' ? '请求超时 (30s)' : (err as Error).message;
-        sendResponse({ error: msg, duration: Date.now() - start });
+        const errMsg = (err as Error).name === 'AbortError' ? '请求超时 (30s)' : (err as Error).message;
+        sendResponse({ error: errMsg, duration: Date.now() - start });
       }
     }
 
@@ -218,6 +266,7 @@ chrome.runtime.onMessage.addListener((msg: any, _sender: any, sendResponse: any)
   // ---- API Tester: history ----
   if (t === 'API_TEST_HISTORY_GET') { storageGet<any[]>('apiHistory', []).then(sendResponse); return true; }
   if (t === 'API_TEST_HISTORY_SAVE') {
+    if (!msg.payload) { sendResponse({ success: false }); return true; }
     storageGet<any[]>('apiHistory', []).then(history => {
       history.unshift(msg.payload);
       if (history.length > 50) history.length = 50;
@@ -232,6 +281,7 @@ chrome.runtime.onMessage.addListener((msg: any, _sender: any, sendResponse: any)
 
   // ---- Intercepted Request Log ----
   if (t === 'LOG_SAVE') {
+    if (!msg.payload) { return false; }
     storageGet<any[]>('interceptLog', []).then(log => {
       log.unshift(msg.payload);
       if (log.length > 200) log.length = 200;
@@ -240,6 +290,7 @@ chrome.runtime.onMessage.addListener((msg: any, _sender: any, sendResponse: any)
     return true;
   }
   if (t === 'LOG_GET') { storageGet<any[]>('interceptLog', []).then(sendResponse); return true; }
+  if (t === 'LOG_COUNT') { storageGet<any[]>('interceptLog', []).then(log => sendResponse(log.length)); return true; }
   if (t === 'LOG_CLEAR') { storageSet('interceptLog', []).then(() => sendResponse({ success: true })); return true; }
   if (t === 'API_SAVED_SAVE') {
     storageGet<any[]>('savedRequests', []).then(list => {

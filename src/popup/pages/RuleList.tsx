@@ -1,6 +1,6 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo, useCallback, useRef, useEffect } from 'react';
 import { MagnifyingGlassIcon, PlusIcon, ArrowDownTrayIcon, ArrowUpTrayIcon, TrashIcon, ClipboardDocumentListIcon, ChevronUpIcon, ChevronDownIcon } from '@heroicons/react/24/outline';
-import { AppState, Rule, MATCH_TYPE_LABELS, ACTION_TYPE_LABELS } from '../../shared/types';
+import { AppState, Rule, RuleGroup, MATCH_TYPE_LABELS, ACTION_TYPE_LABELS } from '../../shared/types';
 import { showToast, showConfirm } from '../../shared/toast';
 
 interface Props {
@@ -10,16 +10,40 @@ interface Props {
 }
 
 export default function RuleList({ state, onRefresh, onEditRule }: Props) {
+  const [searchInput, setSearchInput] = useState('');
   const [search, setSearch] = useState('');
   const [filterGroup, setFilterGroup] = useState('');
+  const debounceRef = useRef<ReturnType<typeof setTimeout>>(undefined);
 
-  const filteredRules = state.rules.filter((rule) => {
-    const matchSearch = !search ||
-      rule.name?.toLowerCase().includes(search.toLowerCase()) ||
-      rule.match?.url?.toLowerCase().includes(search.toLowerCase());
-    const matchGroup = !filterGroup || rule.groupId === filterGroup;
-    return matchSearch && matchGroup;
-  });
+  // Debounce search — 200ms delay
+  const onSearchChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const val = e.target.value;
+    setSearchInput(val);
+    clearTimeout(debounceRef.current);
+    debounceRef.current = setTimeout(() => setSearch(val), 200);
+  }, []);
+
+  useEffect(() => () => clearTimeout(debounceRef.current), []);
+
+  // Group map for O(1) lookup instead of Array.find per card
+  const groupMap = useMemo(() => {
+    const m: Record<string, RuleGroup> = {};
+    for (const g of state.groups) m[g.id] = g;
+    return m;
+  }, [state.groups]);
+
+  const isFiltered = !!(search || filterGroup);
+
+  const filteredRules = useMemo(() => {
+    const q = search.toLowerCase();
+    return state.rules.filter((rule) => {
+      const matchSearch = !q ||
+        rule.name?.toLowerCase().includes(q) ||
+        rule.match?.url?.toLowerCase().includes(q);
+      const matchGroup = !filterGroup || rule.groupId === filterGroup;
+      return matchSearch && matchGroup;
+    });
+  }, [state.rules, search, filterGroup]);
 
   const toggleRule = async (ruleId: string, enabled: boolean) => {
     await chrome.runtime.sendMessage({ type: 'TOGGLE_RULE', payload: { ruleId, enabled } });
@@ -61,7 +85,13 @@ export default function RuleList({ state, onRefresh, onEditRule }: Props) {
       if (!file) return;
       try {
         const text = await file.text();
-        JSON.parse(text);
+        const parsed = JSON.parse(text);
+        if (!parsed.rules && !parsed.groups) {
+          showToast('导入失败：文件中没有找到规则或分组数据', 'error');
+          return;
+        }
+        const confirmed = await showConfirm('导入将覆盖当前所有规则和分组，是否继续？');
+        if (!confirmed) return;
         await chrome.runtime.sendMessage({ type: 'IMPORT_RULES', payload: text });
         onRefresh();
       } catch {
@@ -71,7 +101,7 @@ export default function RuleList({ state, onRefresh, onEditRule }: Props) {
     input.click();
   };
 
-  const getGroup = (groupId: string) => state.groups.find((g) => g.id === groupId);
+  const getGroup = (groupId: string) => groupMap[groupId];
 
   return (
     <div className="flex flex-col h-full">
@@ -82,8 +112,8 @@ export default function RuleList({ state, onRefresh, onEditRule }: Props) {
             <input
               type="text"
               placeholder="搜索规则名称或 URL..."
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
+              value={searchInput}
+              onChange={onSearchChange}
               className="w-full pl-8 pr-3 py-1.5 text-xs border border-gray-200 dark:border-slate-700 rounded-md focus:outline-none focus:border-primary-400 focus:ring-1 focus:ring-primary-100 bg-gray-50 dark:bg-slate-900"
             />
             <MagnifyingGlassIcon className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400" />
@@ -190,12 +220,16 @@ export default function RuleList({ state, onRefresh, onEditRule }: Props) {
 
                     {/* Move + Delete (hover only) */}
                     <div className="rule-hover-actions flex items-center gap-0.5 shrink-0">
-                      <button className="btn-ghost p-0 leading-none" onClick={(e) => { e.stopPropagation(); moveRule(state.rules.findIndex(r => r.id === rule.id), -1); }} title="上移">
-                        <ChevronUpIcon className="w-3.5 h-3.5" />
-                      </button>
-                      <button className="btn-ghost p-0 leading-none" onClick={(e) => { e.stopPropagation(); moveRule(state.rules.findIndex(r => r.id === rule.id), 1); }} title="下移">
-                        <ChevronDownIcon className="w-3.5 h-3.5" />
-                      </button>
+                      {!isFiltered && (
+                        <>
+                          <button className="btn-ghost p-0 leading-none" onClick={(e) => { e.stopPropagation(); moveRule(state.rules.findIndex(r => r.id === rule.id), -1); }} title="上移">
+                            <ChevronUpIcon className="w-3.5 h-3.5" />
+                          </button>
+                          <button className="btn-ghost p-0 leading-none" onClick={(e) => { e.stopPropagation(); moveRule(state.rules.findIndex(r => r.id === rule.id), 1); }} title="下移">
+                            <ChevronDownIcon className="w-3.5 h-3.5" />
+                          </button>
+                        </>
+                      )}
                       <button className="btn-ghost p-1 text-xs" onClick={(e) => deleteRule(rule.id, e)} title="删除">
                         <TrashIcon className="w-4 h-4" />
                       </button>

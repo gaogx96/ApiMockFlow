@@ -10,14 +10,27 @@ else { document.addEventListener('DOMContentLoaded', function () { (document.bod
 
 var badgeActive = false;
 var lastRuleCount = 0;
+var cachedShowBadge = false;
+
+// Cache showBadge value to avoid storage reads on every update
+chrome.storage.local.get('showBadge', function (res) {
+  cachedShowBadge = res?.showBadge === true;
+});
+chrome.storage.onChanged.addListener(function (changes, area) {
+  if (area === 'local' && changes.showBadge) {
+    cachedShowBadge = changes.showBadge.newValue === true;
+  }
+});
 
 function updateBadge(active: boolean, count: number, reqCount?: number) {
-  badge.style.display = 'block';
   badgeActive = active && count > 0;
   if (count > 0) lastRuleCount = count;
+  if (!cachedShowBadge) { badge.style.display = 'none'; return; }
+  badge.style.display = 'block';
   if (badgeActive) {
     badge.style.background = '#1677ff';
-    badge.textContent = 'ApiMockFlow ON | ' + lastRuleCount + ' rules';
+    var rc = (typeof reqCount === 'number' && reqCount > 0) ? reqCount : null;
+    badge.textContent = 'ApiMockFlow ON | ' + lastRuleCount + ' rules' + (rc ? ' | ' + rc + ' intercepted' : '');
   } else {
     badge.style.background = '#9ca3af';
     badge.textContent = 'ApiMockFlow OFF';
@@ -31,21 +44,24 @@ window.addEventListener('message', function (e) {
     updateBadge(badgeActive, lastRuleCount, e.data.count);
   }
   if (e.data.type === 'APII_LOG' && e.data.entry) {
-    try {
-      chrome.runtime.sendMessage({ type: 'LOG_SAVE', payload: e.data.entry });
-    } catch (_) {}
+    var entry = e.data.entry;
+    // Validate entry shape to prevent injection from page scripts
+    if (entry && typeof entry.url === 'string' && typeof entry.method === 'string' && typeof entry.timestamp === 'number') {
+      try {
+        chrome.runtime.sendMessage({ type: 'LOG_SAVE', payload: entry });
+      } catch (_) {}
+    }
   }
 });
 
 // Inject main-world interceptor
 var s = document.createElement('script');
 s.src = chrome.runtime.getURL('interceptor.js');
-s.onload = function () { console.log('[ApiMockFlow] interceptor.js injected'); s.remove(); };
-s.onerror = function () { console.error('[ApiMockFlow] interceptor.js load FAILED'); };
+s.onload = function () { s.remove(); };
+s.onerror = function () {};
 (document.head || document.documentElement).appendChild(s);
 
 // Sync all rules + state to interceptor
-var syncTimer: any = null;
 var contextDead = false;
 
 function syncAll() {
@@ -58,8 +74,7 @@ function syncAll() {
           contextDead = true;
           updateBadge(false, 0);
           window.postMessage({ type: 'APII_SYNC', active: false, globalEnabled: false, rules: [], groups: [] }, '*');
-          if (syncTimer) { clearInterval(syncTimer); syncTimer = null; }
-          console.warn('[ApiMockFlow] Extension context lost, deactivated');
+          // Extension context lost
         }
         return;
       }
@@ -87,15 +102,13 @@ window.addEventListener('message', function handler(e) {
   }
 });
 
-syncTimer = setInterval(syncAll, 1500);
-
-// Listen for storage changes to sync immediately (not just on 1.5s interval)
+// Sync on storage changes (replaces polling — more efficient, no SW wake-ups)
 chrome.storage.onChanged.addListener(function (changes, area) {
   if (area !== 'local') return;
-  if (changes.rules || changes.groups || changes.globalEnabled) {
+  if (changes.rules || changes.groups || changes.globalEnabled || changes.showBadge) {
     syncAll();
   }
 });
 
-console.log('[ApiMockFlow] Content script loaded');
+// Content script loaded
 } // end __apimockflow_loaded guard

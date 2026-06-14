@@ -85,6 +85,7 @@ export interface InterceptedRequest {
 export type MessageType =
   | 'GET_RULES'
   | 'SAVE_RULES'
+  | 'UPSERT_RULE'
   | 'SAVE_GROUPS'
   | 'TOGGLE_RULE'
   | 'TOGGLE_GROUP'
@@ -103,6 +104,7 @@ export type MessageType =
   | 'API_SAVED_DELETE'
   | 'LOG_SAVE'
   | 'LOG_GET'
+  | 'LOG_COUNT'
   | 'LOG_CLEAR';
 
 export interface ExtensionMessage {

@@ -21,5 +21,6 @@
       "@popup/*": ["src/popup/*"]
     }
   },
-  "include": ["src"]
+  "include": ["src"],
+  "exclude": ["src/__tests__"]
 }

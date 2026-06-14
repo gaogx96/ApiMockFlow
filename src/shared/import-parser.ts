@@ -6,7 +6,7 @@ export function detectFormat(input: string): ImportFormat {
   const t = input.trim();
   if (/^curl\s/i.test(t)) return 'curl';
   if (/^(?:GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)\s+https?:\/\//i.test(t)) return 'httpie';
-  if (/^https?:\/\//i.test(t) && /\b(GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)\b/i.test(t)) return 'httpie';
+  if (/^https?\s+/i.test(t) && !/^https?:\/\//i.test(t)) return 'httpie';
   if (/\bopenapi\s*:\s*["']?3\./i.test(t) || (/\b"paths"\s*:/.test(t) && /\b"responses"\s*:/.test(t))) return 'openapi';
   return 'unknown';
 }
@@ -179,7 +179,9 @@ export function parseOpenAPI(input: string): ApiRequest[] {
   const baseUrl = (spec.servers && spec.servers[0] && spec.servers[0].url) || '';
 
   for (const [path, methods] of Object.entries(spec.paths)) {
+    if (!methods || typeof methods !== 'object') continue;
     for (const [method, detail] of Object.entries(methods as Record<string, any>)) {
+      if (!detail || typeof detail !== 'object') continue;
       if (!['get', 'post', 'put', 'delete', 'patch', 'head', 'options'].includes(method)) continue;
       const req: ApiRequest = {
         method: method.toUpperCase(),
@@ -187,14 +189,14 @@ export function parseOpenAPI(input: string): ApiRequest[] {
         headers: {},
         bodyType: 'raw',
       };
-      if (detail.parameters) {
-        const qp = (detail.parameters as any[]).filter((p: any) => p.in === 'query');
+      if (Array.isArray(detail.parameters)) {
+        const qp = detail.parameters.filter((p: any) => p && p.in === 'query');
         if (qp.length > 0) {
           const params = qp.map((p: any) => `${p.name}=${p.example || ''}`).join('&');
           req.url += '?' + params;
         }
-        const hdrs = (detail.parameters as any[]).filter((p: any) => p.in === 'header');
-        hdrs.forEach((h: any) => { req.headers[h.name] = h.example || ''; });
+        const hdrs = detail.parameters.filter((p: any) => p && p.in === 'header');
+        hdrs.forEach((h: any) => { if (h.name) req.headers[h.name] = h.example || ''; });
       }
       if (detail.requestBody?.content?.['application/json']?.example) {
         req.body = JSON.stringify(detail.requestBody.content['application/json'].example, null, 2);

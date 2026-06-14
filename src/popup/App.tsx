@@ -1,8 +1,9 @@
 import React, { useState, useEffect } from 'react';
-import { BoltIcon, BeakerIcon, SunIcon, MoonIcon, DocumentMagnifyingGlassIcon } from '@heroicons/react/24/outline';
+import { BoltIcon, BeakerIcon, SunIcon, MoonIcon, DocumentMagnifyingGlassIcon, EyeIcon, EyeSlashIcon } from '@heroicons/react/24/outline';
 import { AppState, Rule, RuleMatch } from '../shared/types';
 import RuleList from './pages/RuleList';
 import RuleEditor from './pages/RuleEditor';
+import ErrorBoundary from './ErrorBoundary';
 import ApiTester from './pages/ApiTester';
 import NetworkLog from './pages/NetworkLog';
 
@@ -18,13 +19,15 @@ export default function App() {
   const [editingRule, setEditingRule] = useState<Rule | null>(null);
   const [prefillMatch, setPrefillMatch] = useState<Partial<RuleMatch> | null>(null);
   const [dark, setDark] = useState(false);
+  const [showBadge, setShowBadge] = useState(false);
   const [logCount, setLogCount] = useState(0);
 
   useEffect(() => {
-    chrome.storage.local.get('theme', (res) => {
+    chrome.storage.local.get(['theme', 'showBadge'], (res) => {
       const isDark = res.theme === 'dark';
       setDark(isDark);
       if (isDark) document.documentElement.classList.add('dark');
+      setShowBadge(res.showBadge === true);
     });
   }, []);
 
@@ -35,24 +38,31 @@ export default function App() {
     chrome.storage.local.set({ theme: next ? 'dark' : 'light' });
   }
 
+  function toggleBadge() {
+    const next = !showBadge;
+    setShowBadge(next);
+    chrome.storage.local.set({ showBadge: next });
+  }
+
   const refreshState = () => {
     chrome.runtime.sendMessage({ type: 'GET_STATE' }, (res) => {
-      if (res) setState(res);
+      if (chrome.runtime.lastError || !res) return;
+      setState(res);
     });
   };
 
   useEffect(() => { refreshState(); }, []);
 
   useEffect(() => {
-    const fetch = () => {
-      chrome.runtime.sendMessage({ type: 'LOG_GET' }, (res) => {
+    const pollLogCount = () => {
+      chrome.runtime.sendMessage({ type: 'LOG_COUNT' }, (res) => {
         const err = chrome.runtime.lastError;
-        if (err || !res) return;
-        setLogCount(res.length);
+        if (err || res == null) return;
+        setLogCount(res);
       });
     };
-    fetch();
-    const t = setInterval(fetch, 10000);
+    pollLogCount();
+    const t = setInterval(pollLogCount, 10000);
     return () => clearInterval(t);
   }, []);
 
@@ -137,6 +147,7 @@ export default function App() {
 
       {/* Main content */}
       <main className="flex-1 flex flex-col overflow-hidden bg-slate-100 dark:bg-slate-900">
+        <ErrorBoundary>
         {page === 'list' && (
           <RuleList state={state} onRefresh={refreshState} onEditRule={handleEditRule} />
         )}
@@ -155,6 +166,7 @@ export default function App() {
           setPage('editor');
         }} />}
         {page === 'networklog' && <NetworkLog onCreateRule={handleCreateFromLog} />}
+        </ErrorBoundary>
       </main>
 
       {/* Status bar */}
@@ -162,13 +174,22 @@ export default function App() {
         <span className="text-xs text-gray-400 dark:text-slate-500">
           {state.groups.length} 分组 · {ruleCount} 规则
         </span>
-        <button
-          className="flex items-center gap-1 text-xs text-gray-400 hover:text-gray-600 dark:text-slate-500 dark:hover:text-slate-300 transition-colors"
-          onClick={toggleTheme}
-          title={dark ? '切换亮色' : '切换暗色'}
-        >
-          {dark ? <SunIcon className="w-3.5 h-3.5" /> : <MoonIcon className="w-3.5 h-3.5" />}
-        </button>
+        <div className="flex items-center gap-1.5">
+          <button
+            className="flex items-center text-xs text-gray-400 hover:text-gray-600 dark:text-slate-500 dark:hover:text-slate-300 transition-colors"
+            onClick={toggleBadge}
+            title={showBadge ? '隐藏页面标识' : '显示页面标识'}
+          >
+            {showBadge ? <EyeIcon className="w-3.5 h-3.5" /> : <EyeSlashIcon className="w-3.5 h-3.5" />}
+          </button>
+          <button
+            className="flex items-center text-xs text-gray-400 hover:text-gray-600 dark:text-slate-500 dark:hover:text-slate-300 transition-colors"
+            onClick={toggleTheme}
+            title={dark ? '切换亮色' : '切换暗色'}
+          >
+            {dark ? <SunIcon className="w-3.5 h-3.5" /> : <MoonIcon className="w-3.5 h-3.5" />}
+          </button>
+        </div>
       </div>
     </div>
   );

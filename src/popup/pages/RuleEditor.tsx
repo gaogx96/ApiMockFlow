@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import {
   Rule, RuleGroup, RuleMatch, Action, ActionType, MatchType,
   ACTION_TYPE_LABELS, OPERATE_TYPE_LABELS, MATCH_TYPE_LABELS
@@ -47,6 +47,12 @@ export default function RuleEditor({ rule, groups, onSave, onCancel, prefill }: 
   const [testResourceType, setTestResourceType] = useState('');
   const [errors, setErrors] = useState<Record<string, string>>({});
 
+  // Memoize regex validity to avoid recompilation on every render
+  const isRegexValid = useMemo(() => {
+    if (match.matchType !== 'regex' || !match.url.trim()) return null;
+    try { new RegExp(match.url); return true; } catch { return false; }
+  }, [match.matchType, match.url]);
+
   function testMatch() {
     if (!match.url.trim() || !testUrl.trim()) return null;
     // URL match
@@ -63,7 +69,7 @@ export default function RuleEditor({ rule, groups, onSave, onCancel, prefill }: 
     return { ok: true, reason: '匹配成功' };
   }
 
-  var testResult = testMatch();
+  const testResult = useMemo(() => testMatch(), [match.url, match.matchType, match.method, match.resourceType, testUrl, testMethod, testResourceType]);
 
   const updateAction = (index: number, field: keyof Action, value: string) => {
     const newActions = [...actions];
@@ -103,6 +109,18 @@ export default function RuleEditor({ rule, groups, onSave, onCancel, prefill }: 
     setErrors({});
 
     try {
+    // Save new group FIRST (before rule) to avoid dangling groupId
+    if (showNewGroup && newGroupName.trim()) {
+      const groupsResp = await chrome.runtime.sendMessage({ type: 'GET_STATE' });
+      const currentGroups = groupsResp?.groups || [];
+      if (!currentGroups.find((g: RuleGroup) => g.id === groupId)) {
+        const newGroups = [...currentGroups, {
+          id: groupId, name: newGroupName.trim(), enabled: true, color: newGroupColor
+        }];
+        await chrome.runtime.sendMessage({ type: 'SAVE_GROUPS', payload: newGroups });
+      }
+    }
+
     const now = Date.now();
     const newRule: Rule = {
       id: rule?.id || generateId(),
@@ -119,22 +137,10 @@ export default function RuleEditor({ rule, groups, onSave, onCancel, prefill }: 
       })),
     };
 
-    const resp = await chrome.runtime.sendMessage({ type: 'GET_RULES' });
-    const rules: Rule[] = resp || [];
-    const index = rules.findIndex((r) => r.id === newRule.id);
-    if (index >= 0) rules[index] = newRule;
-    else rules.push(newRule);
-    await chrome.runtime.sendMessage({ type: 'SAVE_RULES', payload: rules });
-
-    if (showNewGroup && newGroupName.trim()) {
-      const groupsResp = await chrome.runtime.sendMessage({ type: 'GET_STATE' });
-      const currentGroups = groupsResp?.groups || [];
-      if (!currentGroups.find((g: RuleGroup) => g.id === groupId)) {
-        const newGroups = [...currentGroups, {
-          id: groupId, name: newGroupName.trim(), enabled: true, color: newGroupColor
-        }];
-        await chrome.runtime.sendMessage({ type: 'SAVE_GROUPS', payload: newGroups });
-      }
+    const upsertResp = await chrome.runtime.sendMessage({ type: 'UPSERT_RULE', payload: newRule });
+    if (upsertResp && upsertResp.success === false) {
+      showToast('保存失败：' + (upsertResp.error || '未知错误'), 'error');
+      return;
     }
 
     onSave();
@@ -291,18 +297,27 @@ export default function RuleEditor({ rule, groups, onSave, onCancel, prefill }: 
                 }
                 value={match.url}
                 onChange={(e) => { setMatch({ ...match, url: e.target.value }); clearError('matchUrl'); }}
+                onPaste={(e) => {
+                  // Smart URL detection on paste
+                  const text = e.clipboardData.getData('text').trim();
+                  if (!text) return;
+                  const hasRegex = /[.*+?^${}()|[\]\\]/.test(text.replace(/https?:\/\//, ''));
+                  const isFullUrl = /^https?:\/\//i.test(text);
+                  const isDomain = /^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/.test(text) && !text.includes('/');
+                  if (hasRegex) {
+                    setMatch(m => ({ ...m, matchType: 'regex' }));
+                  } else if (isDomain) {
+                    setMatch(m => ({ ...m, matchType: 'domain' }));
+                  } else if (isFullUrl) {
+                    setMatch(m => ({ ...m, matchType: 'contains' }));
+                  }
+                }}
                 className={`form-input mono flex-1 min-w-0 ${errors.matchUrl ? 'border-red-400' : ''}`}
               />
             </div>
-            {match.matchType === 'regex' && match.url.trim() && !errors.matchUrl && (
-              <div className={`text-xs pl-[76px] -mt-1.5 ${
-                (() => { try { new RegExp(match.url); return true; } catch { return false; } })()
-                  ? 'text-green-600'
-                  : 'text-red-500'
-              }`}>
-                {(() => { try { new RegExp(match.url); return true; } catch { return false; } })()
-                  ? '✓ 正则表达式有效'
-                  : '✗ 正则表达式无效'}
+            {isRegexValid !== null && !errors.matchUrl && (
+              <div className={`text-xs pl-[76px] -mt-1.5 ${isRegexValid ? 'text-green-600' : 'text-red-500'}`}>
+                {isRegexValid ? '✓ 正则表达式有效' : '✗ 正则表达式无效'}
               </div>
             )}
             {errors.matchUrl && <p className="text-xs text-red-500 pl-[76px] -mt-1.5">{errors.matchUrl}</p>}
@@ -434,6 +449,11 @@ export default function RuleEditor({ rule, groups, onSave, onCancel, prefill }: 
                       rows={action.type === 'injectScript' ? 6 : action.type.includes('Body') ? 5 : (action.type.includes('Header') || action.type === 'modifyRequestUrl') ? 1 : 2}
                       className="form-textarea text-xs"
                     />
+                  )}
+                  {action.type === 'injectScript' && (
+                    <p className="text-xs text-amber-600 dark:text-amber-400">
+                      警告：注入的脚本在页面上下文中执行，可访问页面所有数据。仅使用你信任的脚本。
+                    </p>
                   )}
                 </div>
               </div>

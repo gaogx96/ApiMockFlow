@@ -70,14 +70,26 @@ export function showConfirm(message: string): Promise<boolean> {
       background: ${bg}; border: 1px solid ${borderColor}; border-radius: 8px;
       padding: 20px; max-width: 280px; width: 90%; box-shadow: 0 4px 16px rgba(0,0,0,0.15);
     `;
-    dialog.innerHTML = `
-      <p style="margin:0 0 16px; font-size:13px; color:${textColor}; line-height:1.5;">${message}</p>
-      <div style="display:flex; gap:8px; justify-content:flex-end;">
-        <button id="_confirm_cancel" style="padding:6px 16px; border:1px solid ${borderColor}; border-radius:6px; background:${bg}; color:${textColor}; font-size:13px; cursor:pointer;">取消</button>
-        <button id="_confirm_ok" style="padding:6px 16px; border:none; border-radius:6px; background:#1677ff; color:white; font-size:13px; cursor:pointer;">确定</button>
-      </div>
-    `;
 
+    const msg = document.createElement('p');
+    msg.style.cssText = `margin:0 0 16px; font-size:13px; color:${textColor}; line-height:1.5;`;
+    msg.textContent = message;
+
+    const btnRow = document.createElement('div');
+    btnRow.style.cssText = 'display:flex; gap:8px; justify-content:flex-end;';
+
+    const cancelBtn = document.createElement('button');
+    cancelBtn.textContent = '取消';
+    cancelBtn.style.cssText = `padding:6px 16px; border:1px solid ${borderColor}; border-radius:6px; background:${bg}; color:${textColor}; font-size:13px; cursor:pointer;`;
+
+    const okBtn = document.createElement('button');
+    okBtn.textContent = '确定';
+    okBtn.style.cssText = 'padding:6px 16px; border:none; border-radius:6px; background:#3b82f6; color:white; font-size:13px; cursor:pointer;';
+
+    btnRow.appendChild(cancelBtn);
+    btnRow.appendChild(okBtn);
+    dialog.appendChild(msg);
+    dialog.appendChild(btnRow);
     overlay.appendChild(dialog);
     document.body.appendChild(overlay);
 
@@ -86,8 +98,8 @@ export function showConfirm(message: string): Promise<boolean> {
       resolve(result);
     };
 
-    dialog.querySelector('#_confirm_cancel')!.addEventListener('click', () => cleanup(false));
-    dialog.querySelector('#_confirm_ok')!.addEventListener('click', () => cleanup(true));
+    cancelBtn.addEventListener('click', () => cleanup(false));
+    okBtn.addEventListener('click', () => cleanup(true));
     overlay.addEventListener('click', (e) => { if (e.target === overlay) cleanup(false); });
   });
 }
