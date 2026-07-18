@@ -48,9 +48,15 @@ export default function ApiTester({ onCreateRule }: Props) {
   const [importedReqs, setImportedReqs] = useState<ApiRequest[]>([]);
   const [saveName, setSaveName] = useState('');
   const [showSaveDialog, setShowSaveDialog] = useState(false);
+  const [allowInternal, setAllowInternal] = useState(false);
   const tabScrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => { loadHistory(); loadSaved(); }, []);
+  useEffect(() => {
+    chrome.storage.local.get('allowInternalNetwork', (res) => {
+      if (res.allowInternalNetwork === true) setAllowInternal(true);
+    });
+  }, []);
 
   const tab = tabs[activeIdx];
 
@@ -110,7 +116,17 @@ export default function ApiTester({ onCreateRule }: Props) {
     const req: ApiRequest = { method: tab.method, url: tab.url.trim(), headers: h, body: tab.body || undefined, bodyType: tab.bodyType as any };
     chrome.runtime.sendMessage({ type: 'API_TEST_REQUEST', payload: req }, (resp) => {
       updateTab('loading', false);
-      if (!resp) { updateTab('error', '请求失败：未收到响应'); return; }
+      const lastErr = chrome.runtime.lastError;
+      if (lastErr) {
+        // 白盒化：区分 context invalidated（需重载）和其他错误
+        if (lastErr.message?.includes('Extension context invalidated')) {
+          updateTab('error', '扩展上下文已失效，请刷新插件 Popup 或重新加载扩展 (chrome://extensions → 刷新)');
+        } else {
+          updateTab('error', '通信错误: ' + lastErr.message);
+        }
+        return;
+      }
+      if (!resp) { updateTab('error', '请求失败：后台脚本未响应。请检查扩展是否正常运行，或尝试重新加载扩展。'); return; }
       if (resp.error) { updateTab('error', resp.error); return; }
       updateTab('response', resp);
       saveToHistory(req, resp);
@@ -187,6 +203,12 @@ export default function ApiTester({ onCreateRule }: Props) {
       : tab.name;
     setSaveName(suggested);
     setShowSaveDialog(true);
+  }
+
+  function toggleAllowInternal() {
+    const next = !allowInternal;
+    setAllowInternal(next);
+    chrome.storage.local.set({ allowInternalNetwork: next });
   }
 
   function confirmSave() {
@@ -299,6 +321,15 @@ export default function ApiTester({ onCreateRule }: Props) {
             className="px-2 py-1 text-xs text-gray-500 border border-gray-200 dark:border-slate-700 rounded-md hover:bg-gray-50 dark:hover:bg-gray-800 dark:bg-slate-900"
             title="导入 cURL / HTTPie / OpenAPI">
             <ArrowUpTrayIcon className="w-3.5 h-3.5" />
+          </button>
+          <button onClick={toggleAllowInternal}
+            className={`px-2 py-1 text-xs border rounded-md transition-colors ${
+              allowInternal
+                ? 'border-green-300 bg-green-50 text-green-700 dark:border-green-600 dark:bg-green-900/30 dark:text-green-400'
+                : 'border-gray-200 text-amber-500 dark:border-slate-700 dark:bg-slate-900 dark:text-amber-400'
+            }`}
+            title={allowInternal ? '允许访问内网地址（点击关闭）' : '内网地址已拦截（点击放行）'}>
+            <ShieldCheckIcon className="w-3.5 h-3.5" />
           </button>
         </div>
       </div>

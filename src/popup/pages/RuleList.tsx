@@ -57,6 +57,22 @@ export default function RuleList({ state, onRefresh, onEditRule }: Props) {
     onRefresh();
   };
 
+  // 批量操作：一键禁用/启用所有规则
+  const toggleAllRules = async (enabled: boolean) => {
+    const action = enabled ? '启用' : '禁用';
+    if (!await showConfirm(`确定${action}所有 ${state.rules.length} 条规则？`)) return;
+    const updated = state.rules.map(r => ({ ...r, enabled }));
+    await chrome.runtime.sendMessage({ type: 'SAVE_RULES', payload: updated });
+    onRefresh();
+  };
+
+  // 批量操作：清空所有规则
+  const clearAllRules = async () => {
+    if (!await showConfirm(`确定删除所有 ${state.rules.length} 条规则？此操作不可撤销。`)) return;
+    await chrome.runtime.sendMessage({ type: 'SAVE_RULES', payload: [] });
+    onRefresh();
+  };
+
   const moveRule = async (idx: number, dir: -1 | 1) => {
     const newRules = [...state.rules];
     const targetIdx = idx + dir;
@@ -243,7 +259,7 @@ export default function RuleList({ state, onRefresh, onEditRule }: Props) {
       </div>
 
       {/* Bottom bar */}
-      <div className="flex gap-2 px-3 py-2 border-t border-gray-100 dark:border-slate-700 bg-gray-50 dark:bg-slate-900 shrink-0">
+      <div className="flex gap-1.5 px-3 py-2 border-t border-gray-100 dark:border-slate-700 bg-gray-50 dark:bg-slate-900 shrink-0">
         <button
           onClick={handleExport}
           className="flex-1 py-1.5 text-xs text-gray-600 bg-white dark:bg-slate-800 border border-gray-200 dark:border-slate-700 rounded-md hover:bg-gray-50 dark:hover:bg-slate-700 font-medium"
@@ -256,6 +272,24 @@ export default function RuleList({ state, onRefresh, onEditRule }: Props) {
         >
           <ArrowUpTrayIcon className="w-3.5 h-3.5 inline -mt-0.5" /> 导入
         </button>
+        {state.rules.length > 0 && (
+          <>
+            <button
+              onClick={() => toggleAllRules(state.rules.every(r => r.enabled))}
+              className="py-1.5 px-2 text-xs text-amber-600 bg-white dark:bg-slate-800 border border-amber-200 dark:border-amber-800 rounded-md hover:bg-amber-50 dark:hover:bg-amber-900/20 font-medium"
+              title={state.rules.every(r => r.enabled) ? '禁用所有规则' : '启用所有规则'}
+            >
+              {state.rules.every(r => r.enabled) ? '全禁' : '全启'}
+            </button>
+            <button
+              onClick={clearAllRules}
+              className="py-1.5 px-2 text-xs text-red-500 bg-white dark:bg-slate-800 border border-red-200 dark:border-red-800 rounded-md hover:bg-red-50 dark:hover:bg-red-900/20 font-medium"
+              title="清空所有规则"
+            >
+              <TrashIcon className="w-3.5 h-3.5 inline -mt-0.5" /> 全清
+            </button>
+          </>
+        )}
       </div>
     </div>
   );

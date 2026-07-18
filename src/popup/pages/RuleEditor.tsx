@@ -177,6 +177,28 @@ export default function RuleEditor({ rule, groups, onSave, onCancel, prefill }: 
     return '值';
   };
 
+  // 值域校验：测试环境下给出实时提示，但不阻止保存
+  const getValueWarning = (action: Action): string | null => {
+    const v = action.value?.trim();
+    if (!v) return null;
+    if (action.type === 'modifyStatusCode') {
+      const n = parseInt(v);
+      if (isNaN(n) || n < 100 || n > 599) return '状态码必须是 100-599 之间的数字';
+    }
+    if (action.type === 'delay') {
+      const n = parseInt(v);
+      if (isNaN(n) || n < 0) return '延迟必须是正整数（毫秒），最大 30000';
+      if (n > 30000) return '延迟上限为 30000ms（30秒），超出将被自动截断';
+    }
+    if (action.type === 'redirect') {
+      try { new URL(v); } catch { return 'URL 格式无效，需以 http:// 或 https:// 开头'; }
+    }
+    if (action.type === 'modifyResponseBody' && action.operate === 'set') {
+      try { JSON.parse(v); } catch { return '提示：不是合法 JSON，将以纯文本形式设置为响应体'; }
+    }
+    return null;
+  };
+
   return (
     <div className="flex flex-col h-full">
       {/* Header */}
@@ -442,18 +464,26 @@ export default function RuleEditor({ rule, groups, onSave, onCancel, prefill }: 
                     </div>
                   )}
                   {showValueField(action.type) && (
-                    <textarea
-                      placeholder={getValuePlaceholder(action)}
-                      value={action.value}
-                      onChange={(e) => updateAction(i, 'value', e.target.value)}
-                      rows={action.type === 'injectScript' ? 6 : action.type.includes('Body') ? 5 : (action.type.includes('Header') || action.type === 'modifyRequestUrl') ? 1 : 2}
-                      className="form-textarea text-xs"
-                    />
+                    <div>
+                      <textarea
+                        placeholder={getValuePlaceholder(action)}
+                        value={action.value}
+                        onChange={(e) => updateAction(i, 'value', e.target.value)}
+                        rows={action.type === 'injectScript' ? 6 : action.type.includes('Body') ? 5 : (action.type.includes('Header') || action.type === 'modifyRequestUrl') ? 1 : 2}
+                        className="form-textarea text-xs"
+                      />
+                      {(() => {
+                        const w = getValueWarning(action);
+                        return w ? <p className="text-xs text-amber-500 dark:text-amber-400 mt-1">{w}</p> : null;
+                      })()}
+                    </div>
                   )}
                   {action.type === 'injectScript' && (
-                    <p className="text-xs text-amber-600 dark:text-amber-400">
-                      警告：注入的脚本在页面上下文中执行，可访问页面所有数据。仅使用你信任的脚本。
-                    </p>
+                    <div className="text-xs text-amber-600 dark:text-amber-400 space-y-1">
+                      <p>警告：注入的脚本在页面上下文中执行，可访问页面所有数据。仅使用你信任的脚本。</p>
+                      <p>注意：避免死循环（while true）和超大计算量，否则页面将卡死需手动刷新。脚本执行超 2 秒可能阻塞页面。</p>
+                      <p className="font-mono text-gray-500">ctx = {`{ url, headers, body }`} — 修改 ctx.url / ctx.body 即可影响请求</p>
+                    </div>
                   )}
                 </div>
               </div>

@@ -189,10 +189,28 @@ if (window.__APII_INIT) { /* already injected */ } else { window.__APII_INIT = t
             else if (a.operate === 'set') { b = a.value; bodyChanged = true; }
           }
           break;
-        case 'redirect': if (a.operate === 'set') u = a.value; break;
+        case 'redirect':
+          if (a.operate === 'set') {
+            // 验证重定向 URL 格式，避免 fetch 抛出不透明的 TypeError
+            try { new URL(a.value); u = a.value; } catch (urlErr) {
+              console.warn('[ApiMockFlow] redirect URL 格式无效，已跳过:', a.value, urlErr.message);
+            }
+          }
+          break;
         case 'cancel': cancelled = true; break;
         case 'delay': delayMs = Math.max(delayMs, Math.min(parseInt(a.value) || 0, 30000)); break;
-        case 'injectScript': try { var _ctx = { url: u, headers: h, body: b }; new Function('ctx', a.value)(_ctx); u = _ctx.url; b = _ctx.body; } catch (err) { void 0; } break;
+        case 'injectScript':
+          try {
+            var _ctx = { url: u, headers: h, body: b };
+            new Function('ctx', a.value)(_ctx);
+            u = _ctx.url; b = _ctx.body;
+          } catch (err) {
+            // 白盒化：将注入脚本报错暴露给测试人员，而非静默吞掉
+            var errMsg = 'injectScript 执行错误: ' + (err && err.message ? err.message : String(err));
+            console.warn('[ApiMockFlow]', errMsg, '\n脚本内容:', a.value.slice(0, 200));
+            postLog({ id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6), timestamp: Date.now(), url: u, method: 'INJECT_ERROR', ruleIds: [], ruleNames: [], originalRequest: { headers: h, body: trunc(b, 200) }, modifiedRequest: { url: u, headers: h, body: trunc(b, 200) }, originalResponse: undefined, modifiedResponse: { status: 0, statusText: errMsg, headers: {}, body: '' }, cancelled: false, delayed: false, delayMs: 0 });
+          }
+          break;
       }
     }
     if (bodyChanged) { delete h['content-length']; }
@@ -287,7 +305,8 @@ if (window.__APII_INIT) { /* already injected */ } else { window.__APII_INIT = t
           return new Response(finalBody, { status: rmod.status, statusText: rmod.statusText, headers: rmod.headers });
         } catch (readErr) {
           // Response body unreadable (opaque, stream consumed, etc.) — return original response
-          void 0;
+          console.warn('[ApiMockFlow] 响应体读取失败，无法应用响应修改:', readErr && readErr.message);
+          postLog({ id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6), timestamp: Date.now(), url: origUrl, method: method, ruleIds: rules.map(function(r){return r.id;}), ruleNames: rules.map(function(r){return r.name;}), originalRequest: origReq, modifiedRequest: modReq, originalResponse: undefined, modifiedResponse: { status: 0, statusText: '响应体读取失败(可能是opaque响应或流已消费)，修改未生效', headers: {}, body: '' }, cancelled: false, delayed: rm.delayMs > 0, delayMs: rm.delayMs });
           return resp;
         }
       }
@@ -415,7 +434,7 @@ if (window.__APII_INIT) { /* already injected */ } else { window.__APII_INIT = t
                 try{Object.defineProperty(self,'status',{value:rmod.status,writable:true,configurable:true});Object.defineProperty(self,'statusText',{value:rmod.statusText,writable:true,configurable:true});Object.defineProperty(self,'responseText',{value:rmod.body,writable:true,configurable:true});Object.defineProperty(self,'response',{value:rmod.body,writable:true,configurable:true});self.getResponseHeader=function(n){for(var k2 in rmod.headers){if(k2.toLowerCase()===n.toLowerCase())return rmod.headers[k2];}return null;};self.getAllResponseHeaders=function(){return Object.keys(rmod.headers).map(function(k2){return k2+': '+rmod.headers[k2];}).join('\r\n');};}catch(_){}
                 xhrLog(xhrOrigResp2, { status: rmod.status, statusText: rmod.statusText, headers: rmod.headers, body: trunc(rmod.body, 2000) });
               } catch (readErr) {
-                void 0;
+                console.warn('[ApiMockFlow] XHR 响应体读取失败:', readErr && readErr.message);
               }
             }
           });

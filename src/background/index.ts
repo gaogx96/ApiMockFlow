@@ -203,16 +203,22 @@ chrome.runtime.onMessage.addListener((msg: any, _sender: any, sendResponse: any)
       sendResponse({ error: '仅支持 http:// 和 https:// 协议' });
       return false;
     }
-    // SSRF protection: block private/internal IPs
-    try {
-      const parsedUrl = new URL(url);
-      const host = parsedUrl.hostname.replace(/^\[|\]$/g, ''); // strip IPv6 brackets
-      const blocked = ['127.0.0.1', '0.0.0.0', '169.254.169.254', 'localhost', '::1', '::ffff:127.0.0.1'];
-      if (blocked.includes(host) || /^10\./.test(host) || /^192\.168\./.test(host) || /^172\.(1[6-9]|2\d|3[01])\./.test(host) || /^fe80:/i.test(host) || /^f[cd]/i.test(host)) {
-        sendResponse({ error: '不允许访问内网地址' });
-        return false;
-      }
-    } catch (_) {}
+    // SSRF protection: block private/internal IPs (unless user allows it)
+    function checkSSRF(): Promise<boolean> {
+      return storageGet<boolean>('allowInternalNetwork', false).then(allowInternal => {
+        if (allowInternal) return true; // user allowed, skip check
+        try {
+          const parsedUrl = new URL(url);
+          const host = parsedUrl.hostname.replace(/^\[|\]$/g, '');
+          const blocked = ['127.0.0.1', '0.0.0.0', '169.254.169.254', 'localhost', '::1', '::ffff:127.0.0.1'];
+          if (blocked.includes(host) || /^10\./.test(host) || /^192\.168\./.test(host) || /^172\.(1[6-9]|2\d|3[01])\./.test(host) || /^fe80:/i.test(host) || /^f[cd]/i.test(host)) {
+            sendResponse({ error: '不允许访问内网地址' });
+            return false;
+          }
+        } catch (_) {}
+        return true;
+      });
+    }
     const start = Date.now();
 
     async function doRequest() {
@@ -259,7 +265,7 @@ chrome.runtime.onMessage.addListener((msg: any, _sender: any, sendResponse: any)
       }
     }
 
-    doRequest();
+    checkSSRF().then(ok => { if (ok) doRequest(); });
     return true;
   }
 

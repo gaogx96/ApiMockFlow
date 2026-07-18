@@ -18,7 +18,13 @@ export default function NetworkLog({ onCreateRule }: Props) {
   const fetchLogs = () => {
     chrome.runtime.sendMessage({ type: 'LOG_GET' }, (res) => {
       const err = chrome.runtime.lastError;
-      if (err) return;
+      if (err) {
+        // 白盒化：context invalidated 时停止轮询并提示，而非静默吞掉
+        if (err.message?.includes('Extension context invalidated')) {
+          setAutoRefresh(false);
+        }
+        return;
+      }
       if (res) setLogs(res);
     });
   };
@@ -76,19 +82,51 @@ export default function NetworkLog({ onCreateRule }: Props) {
       log.modifiedRequest.body !== log.originalRequest.body;
   };
 
+  // 行级 Diff：高亮具体的变更行，而非整块着色
   const renderDiff = (label: string, orig: string, mod: string) => {
     const changed = orig !== mod;
-    return (
-      <div className="space-y-1">
-        <div className="text-xs font-semibold text-gray-500 uppercase">{label}</div>
-        <div className="grid grid-cols-2 gap-2">
-          <div className={`text-xs p-2 rounded font-mono whitespace-pre-wrap break-all ${changed ? 'bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800' : 'bg-gray-50 dark:bg-slate-900 border border-gray-200 dark:border-slate-700'}`}>
-            <div className="text-xs text-gray-400 mb-1">原始</div>
+    if (!changed) {
+      return (
+        <div className="space-y-1">
+          <div className="text-xs font-semibold text-gray-500 uppercase">{label}</div>
+          <div className="text-xs p-2 rounded font-mono whitespace-pre-wrap break-all bg-gray-50 dark:bg-slate-900 border border-gray-200 dark:border-slate-700">
+            <div className="text-xs text-gray-400 mb-1">原始 = 修改后（无变更）</div>
             {orig || <span className="text-gray-300">无</span>}
           </div>
-          <div className={`text-xs p-2 rounded font-mono whitespace-pre-wrap break-all ${changed ? 'bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800' : 'bg-gray-50 dark:bg-slate-900 border border-gray-200 dark:border-slate-700'}`}>
+        </div>
+      );
+    }
+
+    const origLines = (orig || '').split('\n');
+    const modLines = (mod || '').split('\n');
+    const origSet = new Set(origLines);
+    const modSet = new Set(modLines);
+
+    return (
+      <div className="space-y-1">
+        <div className="text-xs font-semibold text-gray-500 uppercase">{label} <span className="text-red-500">(已修改)</span></div>
+        <div className="grid grid-cols-2 gap-2">
+          <div className="text-xs p-2 rounded font-mono whitespace-pre-wrap break-all bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800">
+            <div className="text-xs text-gray-400 mb-1">原始</div>
+            {origLines.map((line, i) => {
+              const isRemoved = !modSet.has(line);
+              return (
+                <div key={i} className={isRemoved ? 'bg-red-200 dark:bg-red-800/50 px-0.5 -mx-0.5 rounded' : ''}>
+                  {line || ' '}
+                </div>
+              );
+            })}
+          </div>
+          <div className="text-xs p-2 rounded font-mono whitespace-pre-wrap break-all bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800">
             <div className="text-xs text-gray-400 mb-1">修改后</div>
-            {mod || <span className="text-gray-300">无</span>}
+            {modLines.map((line, i) => {
+              const isAdded = !origSet.has(line);
+              return (
+                <div key={i} className={isAdded ? 'bg-green-200 dark:bg-green-800/50 px-0.5 -mx-0.5 rounded' : ''}>
+                  {line || ' '}
+                </div>
+              );
+            })}
           </div>
         </div>
       </div>
