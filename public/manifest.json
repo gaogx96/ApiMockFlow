@@ -1,9 +1,9 @@
 {
   "manifest_version": 3,
   "name": "ApiMockFlow",
-  "version": "1.2.0",
+  "version": "1.2.2",
   "description": "修改请求参数和响应数据的浏览器插件",
-  "permissions": ["storage", "cookies", "scripting", "tabs"],
+  "permissions": ["storage", "cookies", "scripting", "tabs", "webRequest"],
   "host_permissions": ["<all_urls>"],
   "background": {
     "service_worker": "background.js"

@@ -27,4 +27,6 @@ export interface SavedRequest {
   name: string;
   request: ApiRequest;
   timestamp: number;
+  /** 发送时是否用浏览器当前有效 Cookie 覆盖已保存的 Cookie 头 */
+  autoRefreshCookie?: boolean;
 }

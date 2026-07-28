@@ -1,8 +1,10 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { ArrowUpTrayIcon, SignalIcon, ClockIcon, XMarkIcon, PlusIcon, BookmarkIcon, BookmarkSlashIcon, ShieldCheckIcon } from '@heroicons/react/24/outline';
+import { ArrowUpTrayIcon, SignalIcon, ClockIcon, XMarkIcon, PlusIcon, BookmarkIcon, BookmarkSlashIcon, ShieldCheckIcon, ArrowPathIcon, FunnelIcon } from '@heroicons/react/24/outline';
 import { ApiRequest, ApiResponse, ApiHistoryItem, SavedRequest } from '../../shared/api-types';
 import { parseImport } from '../../shared/import-parser';
 import { generateId } from '../../shared/constants';
+import { showToast } from '../../shared/toast';
+import { parseJwtExpiry, humanizeDuration } from '../../shared/jwt';
 
 const METHODS = ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'HEAD', 'OPTIONS'];
 const BODY_TYPES = [
@@ -21,6 +23,7 @@ interface TabData {
   response: ApiResponse | null;
   error: string;
   loading: boolean;
+  autoRefreshCookie: boolean;
 }
 
 function createTab(name?: string): TabData {
@@ -30,6 +33,7 @@ function createTab(name?: string): TabData {
     method: 'GET', url: '',
     headers: [['', '']], body: '', bodyType: 'raw',
     response: null, error: '', loading: false,
+    autoRefreshCookie: false,
   };
 }
 
@@ -49,12 +53,17 @@ export default function ApiTester({ onCreateRule }: Props) {
   const [saveName, setSaveName] = useState('');
   const [showSaveDialog, setShowSaveDialog] = useState(false);
   const [allowInternal, setAllowInternal] = useState(false);
+  const [syncingCookie, setSyncingCookie] = useState(false);
+  const [showWhitelist, setShowWhitelist] = useState(false);
+  const [whitelist, setWhitelist] = useState<string[]>([]);
+  const [whitelistInput, setWhitelistInput] = useState('');
   const tabScrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => { loadHistory(); loadSaved(); }, []);
   useEffect(() => {
-    chrome.storage.local.get('allowInternalNetwork', (res) => {
+    chrome.storage.local.get(['allowInternalNetwork', 'authCaptureWhitelist'], (res) => {
       if (res.allowInternalNetwork === true) setAllowInternal(true);
+      if (Array.isArray(res.authCaptureWhitelist)) setWhitelist(res.authCaptureWhitelist);
     });
   }, []);
 
@@ -99,6 +108,94 @@ export default function ApiTester({ onCreateRule }: Props) {
     return Object.keys(h).some(k => k.toLowerCase() === 'content-type');
   }
 
+  // Set or replace headers (case-insensitive) in one pass, so multiple headers
+  // are merged against the current list without React setState races.
+  function applyHeaders(kv: Record<string, string>) {
+    const h = tab.headers.map(pair => [...pair] as [string, string]);
+    const setOne = (name: string, value: string) => {
+      const idx = h.findIndex(([k]) => k.trim().toLowerCase() === name.toLowerCase());
+      if (idx >= 0) {
+        h[idx][1] = value;
+      } else {
+        // Insert before the trailing empty pair (kept for new-row input)
+        const lastEmpty = h.length > 0 && !h[h.length - 1][0] && !h[h.length - 1][1];
+        const entry: [string, string] = [name, value];
+        if (lastEmpty) h.splice(h.length - 1, 0, entry);
+        else { h.push(entry); h.push(['', '']); }
+      }
+    };
+    for (const [k, v] of Object.entries(kv)) setOne(k, v);
+    updateTab('headers', h);
+  }
+
+  // Pull current login state (browser cookies + captured auth headers) into the request.
+  function syncLoginState() {
+    const url = tab.url.trim();
+    if (!url || !/^https?:\/\//i.test(url)) {
+      showToast('请先填写有效的 http(s) URL', 'warning');
+      return;
+    }
+    setSyncingCookie(true);
+    chrome.runtime.sendMessage({ type: 'GET_LOGIN_STATE', payload: { url } }, (resp) => {
+      setSyncingCookie(false);
+      if (chrome.runtime.lastError) { showToast('通信错误: ' + chrome.runtime.lastError.message, 'error'); return; }
+      if (!resp || resp.error) { showToast(resp?.error || '读取登录态失败', 'error'); return; }
+      const authHeaders: Record<string, string> = resp.authHeaders || {};
+      const kv: Record<string, string> = {};
+      if (resp.cookieStr) kv['Cookie'] = resp.cookieStr;
+      Object.assign(kv, authHeaders);
+      if (Object.keys(kv).length === 0) {
+        showToast('未获取到登录态：请先在浏览器登录并操作过该系统（触发过带 token 的请求）', 'warning');
+        return;
+      }
+      applyHeaders(kv);
+      const parts: string[] = [];
+      if (resp.cookieCount) parts.push(`${resp.cookieCount} 个 Cookie`);
+      const authCount = Object.keys(authHeaders).length;
+      if (authCount) parts.push(`${authCount} 个认证头`);
+      const base = parts.length ? `已同步 ${parts.join('、')}` : '已同步登录态';
+
+      // JWT 过期提醒：取所有认证头里最早的 exp
+      let soonestExp: number | null = null;
+      for (const v of Object.values(authHeaders)) {
+        const exp = parseJwtExpiry(v);
+        if (exp !== null && (soonestExp === null || exp < soonestExp)) soonestExp = exp;
+      }
+      if (soonestExp !== null) {
+        const remain = soonestExp - Date.now();
+        if (remain <= 0) {
+          showToast(`${base}，但 Token 已过期（${humanizeDuration(remain)}前）——请在浏览器重新登录后再同步`, 'warning', 6000);
+        } else if (remain < 10 * 60 * 1000) {
+          showToast(`${base}；Token 将在 ${humanizeDuration(remain)}后过期`, 'warning', 5000);
+        } else {
+          showToast(`${base}；Token 有效期约剩 ${humanizeDuration(remain)}`, 'success', 4000);
+        }
+      } else {
+        showToast(base, 'success');
+      }
+    });
+  }
+
+  // ---- 抓取域名白名单 ----
+  function cleanDomain(s: string): string {
+    let d = s.trim().toLowerCase().replace(/^\*+\.?/, '').replace(/^[a-z][a-z0-9+.-]*:\/\//, '');
+    d = d.replace(/[/:?#].*$/, ''); // 去端口/路径/查询
+    return d;
+  }
+  function saveWhitelist(list: string[]) {
+    setWhitelist(list);
+    chrome.storage.local.set({ authCaptureWhitelist: list });
+  }
+  function addWhitelist() {
+    const d = cleanDomain(whitelistInput);
+    setWhitelistInput('');
+    if (!d || whitelist.includes(d)) return;
+    saveWhitelist([...whitelist, d]);
+  }
+  function removeWhitelist(d: string) {
+    saveWhitelist(whitelist.filter(x => x !== d));
+  }
+
   async function sendRequest() {
     if (!tab.url.trim()) { updateTab('error', '请输入 URL'); return; }
     updateTab('loading', true);
@@ -114,7 +211,7 @@ export default function ApiTester({ onCreateRule }: Props) {
     }
 
     const req: ApiRequest = { method: tab.method, url: tab.url.trim(), headers: h, body: tab.body || undefined, bodyType: tab.bodyType as any };
-    chrome.runtime.sendMessage({ type: 'API_TEST_REQUEST', payload: req }, (resp) => {
+    chrome.runtime.sendMessage({ type: 'API_TEST_REQUEST', payload: { ...req, refreshCookie: tab.autoRefreshCookie } }, (resp) => {
       updateTab('loading', false);
       const lastErr = chrome.runtime.lastError;
       if (lastErr) {
@@ -138,7 +235,7 @@ export default function ApiTester({ onCreateRule }: Props) {
     chrome.runtime.sendMessage({ type: 'API_TEST_HISTORY_SAVE', payload: item }, loadHistory);
   }
 
-  function loadRequestToTab(req: ApiRequest) {
+  function loadRequestToTab(req: ApiRequest, autoRefresh = false) {
     const name = req.url ? req.url.replace(/^https?:\/\//, '').split('/')[0] : '新请求';
     updateTab('method', req.method);
     updateTab('url', req.url);
@@ -148,6 +245,7 @@ export default function ApiTester({ onCreateRule }: Props) {
     updateTab('headers', h);
     updateTab('body', req.body || '');
     updateTab('bodyType', req.bodyType || 'raw');
+    updateTab('autoRefreshCookie', autoRefresh);
     updateTab('response', null);
     updateTab('error', '');
     setActiveSubTab('headers');
@@ -213,7 +311,7 @@ export default function ApiTester({ onCreateRule }: Props) {
 
   function confirmSave() {
     const req: ApiRequest = { method: tab.method, url: tab.url, headers: getHeadersRecord(), body: tab.body || undefined, bodyType: tab.bodyType as any };
-    const item: SavedRequest = { id: generateId(), name: saveName || '未命名', request: req, timestamp: Date.now() };
+    const item: SavedRequest = { id: generateId(), name: saveName || '未命名', request: req, timestamp: Date.now(), autoRefreshCookie: tab.autoRefreshCookie };
     chrome.runtime.sendMessage({ type: 'API_SAVED_SAVE', payload: item }, () => {
       loadSaved();
       setShowSaveDialog(false);
@@ -336,14 +434,22 @@ export default function ApiTester({ onCreateRule }: Props) {
 
       {/* Save dialog */}
       {showSaveDialog && (
-        <div className="px-2 py-1.5 border-b border-gray-100 dark:border-slate-700 bg-blue-50 shrink-0 flex gap-1.5 items-center">
-          <input type="text" placeholder="请求名称..."
-            value={saveName} onChange={e => setSaveName(e.target.value)}
-            onKeyDown={e => { if (e.key === 'Enter') confirmSave(); if (e.key === 'Escape') setShowSaveDialog(false); }}
-            className="form-input flex-1 text-xs" style={{ padding: '4px 6px', fontSize: 11 }}
-            autoFocus />
-          <button onClick={confirmSave} className="px-3 py-1 text-xs bg-primary-500 text-white rounded font-medium">保存</button>
-          <button onClick={() => setShowSaveDialog(false)} className="px-2 py-1 text-xs text-gray-500">取消</button>
+        <div className="px-2 py-1.5 border-b border-gray-100 dark:border-slate-700 bg-blue-50 dark:bg-slate-900 shrink-0 space-y-1.5">
+          <div className="flex gap-1.5 items-center">
+            <input type="text" placeholder="请求名称..."
+              value={saveName} onChange={e => setSaveName(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter') confirmSave(); if (e.key === 'Escape') setShowSaveDialog(false); }}
+              className="form-input flex-1 text-xs" style={{ padding: '4px 6px', fontSize: 11 }}
+              autoFocus />
+            <button onClick={confirmSave} className="px-3 py-1 text-xs bg-primary-500 text-white rounded font-medium">保存</button>
+            <button onClick={() => setShowSaveDialog(false)} className="px-2 py-1 text-xs text-gray-500">取消</button>
+          </div>
+          <label className="flex items-center gap-1 text-xs text-gray-600 dark:text-gray-300 cursor-pointer select-none" style={{ fontSize: 11 }}>
+            <input type="checkbox" checked={tab.autoRefreshCookie}
+              onChange={e => updateTab('autoRefreshCookie', e.target.checked)}
+              className="w-3 h-3" />
+            发送时自动同步登录态（Cookie + Token，避免过期）
+          </label>
         </div>
       )}
 
@@ -397,6 +503,57 @@ export default function ApiTester({ onCreateRule }: Props) {
       <div className="flex-1 overflow-y-auto">
         {activeSubTab === 'headers' && (
           <div className="p-2 space-y-1">
+            <div className="flex items-center gap-2 mb-1.5 pb-1.5 border-b border-gray-100 dark:border-slate-700">
+              <button onClick={syncLoginState} disabled={syncingCookie}
+                className="flex items-center gap-1 px-2 py-1 text-xs border border-gray-200 dark:border-slate-700 rounded-md text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800 disabled:opacity-50"
+                title="从浏览器读取该域名当前有效的 Cookie 及捕获到的 Authorization/token 认证头，写入请求头">
+                <ArrowPathIcon className={`w-3.5 h-3.5 ${syncingCookie ? 'animate-spin' : ''}`} />
+                {syncingCookie ? '同步中...' : '同步登录态'}
+              </button>
+              <label className="flex items-center gap-1 text-xs text-gray-600 dark:text-gray-300 cursor-pointer select-none" style={{ fontSize: 11 }}
+                title="开启后，每次发送都会用浏览器最新的 Cookie 与认证头覆盖请求头，避免登录态过期">
+                <input type="checkbox" checked={tab.autoRefreshCookie}
+                  onChange={e => updateTab('autoRefreshCookie', e.target.checked)}
+                  className="w-3 h-3" />
+                发送时自动同步
+              </label>
+              <button onClick={() => setShowWhitelist(v => !v)}
+                className={`ml-auto flex items-center gap-1 px-2 py-1 text-xs border rounded-md transition-colors ${
+                  showWhitelist || whitelist.length
+                    ? 'border-primary-300 text-primary-600 dark:border-primary-600 dark:text-primary-400'
+                    : 'border-gray-200 text-gray-500 dark:border-slate-700 dark:text-gray-400'
+                } hover:bg-gray-50 dark:hover:bg-gray-800`}
+                title="抓取域名白名单：限定后台监听哪些站点的登录态">
+                <FunnelIcon className="w-3.5 h-3.5" />
+                白名单{whitelist.length ? ` (${whitelist.length})` : ''}
+              </button>
+            </div>
+            {showWhitelist && (
+              <div className="mb-1.5 p-2 rounded-md border border-gray-200 dark:border-slate-700 bg-gray-50 dark:bg-slate-900">
+                <div className="text-xs text-gray-500 mb-1.5" style={{ fontSize: 10, lineHeight: 1.5 }}>
+                  留空 = 抓取所有站点的登录态；填写后仅监听这些域名（含子域），可减少后台开销与隐私足迹。
+                </div>
+                <div className="flex gap-1 mb-1.5">
+                  <input value={whitelistInput} onChange={e => setWhitelistInput(e.target.value)}
+                    onKeyDown={e => { if (e.key === 'Enter') addWhitelist(); }}
+                    placeholder="如 example.com"
+                    className="form-input flex-1 text-xs" style={{ padding: '3px 6px', fontSize: 11 }} />
+                  <button onClick={addWhitelist} className="px-2 py-1 text-xs bg-primary-500 text-white rounded font-medium whitespace-nowrap">添加</button>
+                </div>
+                {whitelist.length === 0 ? (
+                  <div className="text-xs text-gray-400" style={{ fontSize: 10 }}>（当前：抓取所有站点）</div>
+                ) : (
+                  <div className="flex flex-wrap gap-1">
+                    {whitelist.map(d => (
+                      <span key={d} className="inline-flex items-center gap-1 px-1.5 py-0.5 text-xs bg-white dark:bg-slate-800 border border-gray-200 dark:border-slate-700 rounded" style={{ fontSize: 10 }}>
+                        {d}
+                        <XMarkIcon className="w-3 h-3 text-gray-400 hover:text-red-500 cursor-pointer" onClick={() => removeWhitelist(d)} />
+                      </span>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
             {tab.headers.map(([k, v], i) => (
               <div key={i} className="flex gap-1">
                 <input type="text" placeholder="键" value={k}
@@ -533,9 +690,14 @@ export default function ApiTester({ onCreateRule }: Props) {
               saved.map((item) => (
                 <div key={item.id}
                   className="px-2 py-1.5 cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-800 dark:bg-slate-900 transition-colors group flex items-center"
-                  onClick={() => loadRequestToTab(item.request)}>
+                  onClick={() => loadRequestToTab(item.request, item.autoRefreshCookie)}>
                   <div className="flex-1 min-w-0">
-                    <div className="text-xs font-medium text-gray-700 truncate" style={{ fontSize: 11 }}>{item.name}</div>
+                    <div className="flex items-center gap-1 text-xs font-medium text-gray-700 dark:text-gray-200 truncate" style={{ fontSize: 11 }}>
+                      <span className="truncate">{item.name}</span>
+                      {item.autoRefreshCookie && (
+                        <ArrowPathIcon className="w-3 h-3 text-green-500 shrink-0" title="发送时自动同步登录态" />
+                      )}
+                    </div>
                     <div className="flex items-center gap-1.5 mt-0.5">
                       <span className={`method-badge method-${item.request.method}`} style={{ fontSize: 9 }}>{item.request.method}</span>
                       <span className="text-xs text-gray-400 truncate" style={{ fontSize: 10 }}>{item.request.url}</span>

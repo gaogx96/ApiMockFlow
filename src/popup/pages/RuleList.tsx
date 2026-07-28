@@ -275,7 +275,7 @@ export default function RuleList({ state, onRefresh, onEditRule }: Props) {
         {state.rules.length > 0 && (
           <>
             <button
-              onClick={() => toggleAllRules(state.rules.every(r => r.enabled))}
+              onClick={() => toggleAllRules(!state.rules.every(r => r.enabled))}
               className="py-1.5 px-2 text-xs text-amber-600 bg-white dark:bg-slate-800 border border-amber-200 dark:border-amber-800 rounded-md hover:bg-amber-50 dark:hover:bg-amber-900/20 font-medium"
               title={state.rules.every(r => r.enabled) ? '禁用所有规则' : '启用所有规则'}
             >

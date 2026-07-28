@@ -18,6 +18,9 @@ export default function App() {
   });
   const [editingRule, setEditingRule] = useState<Rule | null>(null);
   const [prefillMatch, setPrefillMatch] = useState<Partial<RuleMatch> | null>(null);
+  // 每次打开编辑器时自增，作为 RuleEditor 的 key 强制重建，
+  // 避免复用同一实例导致的表单 state 残留（新建/编辑/从日志创建之间）。
+  const [editorNonce, setEditorNonce] = useState(0);
   const [dark, setDark] = useState(false);
   const [showBadge, setShowBadge] = useState(false);
   const [logCount, setLogCount] = useState(0);
@@ -69,18 +72,20 @@ export default function App() {
   const toggleGlobal = async () => {
     const newVal = !state.globalEnabled;
     await chrome.runtime.sendMessage({ type: 'TOGGLE_GLOBAL', payload: newVal });
-    setState({ ...state, globalEnabled: newVal });
+    setState(s => ({ ...s, globalEnabled: newVal }));
   };
 
   const handleEditRule = (rule: Rule | null) => {
     setEditingRule(rule);
     setPrefillMatch(null);
+    setEditorNonce(n => n + 1);
     setPage('editor');
   };
 
   const handleCreateFromLog = (prefill: Partial<RuleMatch>) => {
     setEditingRule(null);
     setPrefillMatch(prefill);
+    setEditorNonce(n => n + 1);
     setPage('editor');
   };
 
@@ -153,6 +158,7 @@ export default function App() {
         )}
         {page === 'editor' && (
           <RuleEditor
+            key={editorNonce}
             rule={editingRule}
             groups={state.groups}
             onSave={handleSaveRule}
@@ -163,6 +169,7 @@ export default function App() {
         {page === 'apitest' && <ApiTester onCreateRule={(prefill) => {
           setEditingRule(null);
           setPrefillMatch({ url: prefill.url, matchType: 'contains', method: prefill.method, resourceType: '' });
+          setEditorNonce(n => n + 1);
           setPage('editor');
         }} />}
         {page === 'networklog' && <NetworkLog onCreateRule={handleCreateFromLog} />}

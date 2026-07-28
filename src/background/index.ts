@@ -50,6 +50,181 @@ function storageSet(key: string, val: any): Promise<void> {
   return new Promise((r) => chrome.storage.local.set({ [key]: val }, r));
 }
 
+// ===== Auth header capture (方案1: 抓真实请求头) =====
+// 监听页面实际发出的请求，按语义模式提取认证类请求头（不针对单一键名），
+// 按 origin 缓存。用于 API Tester「同步登录态」时复用有效的 Authorization / token。
+// 敏感信息只存内存 + chrome.storage.session（内存级，不落磁盘，浏览器关闭即清）。
+
+const AUTH_NAME_RE = /token|auth|session|credential|api[-_]?key/i;
+const authCache = new Map<string, Record<string, string>>(); // origin -> { headerName: value }
+const AUTH_SESSION_KEY = 'authHeadersByOrigin';
+const MAX_AUTH_ORIGINS = 30; // LRU 上限，控制内存/session 体积与隐私足迹
+
+function isAuthHeader(name: string): boolean {
+  const n = name.toLowerCase();
+  if (n === 'cookie') return false; // cookie 单独处理
+  return n === 'authorization' || AUTH_NAME_RE.test(n);
+}
+
+function persistAuthCache() {
+  // 恢复完成前不落盘：SW 重建初期 authCache 可能只含刚抓到的少量 origin，
+  // 此时若全量覆盖 session 会丢失之前已保存的其它 origin（竞态）。
+  if (!authCacheRestored) return;
+  try {
+    chrome.storage.session.set({ [AUTH_SESSION_KEY]: Object.fromEntries(authCache) });
+  } catch (_) { /* storage.session may be unavailable */ }
+}
+
+// SW 启动时从 session 恢复缓存（service worker 被回收后重建）
+let authCacheRestored = false;
+try {
+  chrome.storage.session.get(AUTH_SESSION_KEY, (res) => {
+    const saved = res?.[AUTH_SESSION_KEY];
+    if (saved && typeof saved === 'object') {
+      // 不覆盖恢复前已抓到的更新（更新的值更可信）
+      for (const [origin, headers] of Object.entries(saved)) {
+        if (!authCache.has(origin)) authCache.set(origin, headers as Record<string, string>);
+      }
+    }
+    authCacheRestored = true;
+  });
+} catch (_) { authCacheRestored = true; /* session 不可用则直接放行落盘 */ }
+
+// 抓取域名白名单：留空 = 抓取所有站点；非空 = 只监听这些域名（及子域），减少后台唤醒。
+const WHITELIST_KEY = 'authCaptureWhitelist';
+
+function normalizeDomain(input: string): string | null {
+  let s = (input || '').trim().toLowerCase();
+  if (!s) return null;
+  s = s.replace(/^\*+\.?/, ''); // 去掉前导 * 或 *.
+  try {
+    s = new URL(/^[a-z][a-z0-9+.-]*:\/\//.test(s) ? s : 'http://' + s).hostname;
+  } catch {
+    s = s.replace(/[/:?#].*$/, ''); // 兜底：去掉端口/路径/查询
+  }
+  s = s.replace(/^\[|\]$/g, ''); // 去 IPv6 括号
+  return s || null;
+}
+
+// IP、localhost、单标签主机不追加 "*." 子域 pattern（否则 match pattern 非法或无意义）
+function isIpOrSingleLabel(host: string): boolean {
+  return /^[\d.]+$/.test(host) || host === 'localhost' || host.includes(':') || !host.includes('.');
+}
+
+function domainToPatterns(domain: string): string[] {
+  const pats = [`*://${domain}/*`];
+  if (!isIpOrSingleLabel(domain)) pats.push(`*://*.${domain}/*`);
+  return pats;
+}
+
+function buildFilterUrls(whitelist: string[]): string[] {
+  const norm = (whitelist || []).map(normalizeDomain).filter((d): d is string => !!d);
+  const uniq = [...new Set(norm)];
+  if (uniq.length === 0) return ['<all_urls>']; // 空 / 全部无效 → 抓取所有，保证功能不失效
+  const urls = new Set<string>();
+  for (const d of uniq) for (const p of domainToPatterns(d)) urls.add(p);
+  return [...urls];
+}
+
+const authHeaderListener = (details: chrome.webRequest.OnBeforeSendHeadersDetails): chrome.webRequest.BlockingResponse | undefined => {
+  const headers = details.requestHeaders;
+  if (!headers) return;
+  if (!/^https?:\/\//i.test(details.url)) return; // 只处理 http(s)
+  let origin: string;
+  try { origin = new URL(details.url).origin; } catch { return; }
+
+  const found: Record<string, string> = {};
+  for (const h of headers) {
+    if (h.value && isAuthHeader(h.name)) found[h.name] = h.value;
+  }
+  if (Object.keys(found).length === 0) return;
+
+  const prev = authCache.get(origin) || {};
+  const merged = { ...prev, ...found };
+  // 仅在发生变化时写 session，避免每个请求都写入
+  if (JSON.stringify(prev) !== JSON.stringify(merged)) {
+    authCache.delete(origin);          // 重新插入到末尾（LRU：最近使用）
+    authCache.set(origin, merged);
+    while (authCache.size > MAX_AUTH_ORIGINS) {
+      const oldest = authCache.keys().next().value as string | undefined;
+      if (oldest === undefined) break;
+      authCache.delete(oldest);
+    }
+    persistAuthCache();
+  }
+  return;
+};
+
+// 按白名单重建 webRequest 监听（白名单变化时收窄/放开 filter）
+function registerAuthListener(whitelist: string[]) {
+  if (!chrome.webRequest?.onBeforeSendHeaders) return;
+  try { chrome.webRequest.onBeforeSendHeaders.removeListener(authHeaderListener); } catch (_) { /* not yet added */ }
+  const urls = buildFilterUrls(whitelist);
+  try {
+    chrome.webRequest.onBeforeSendHeaders.addListener(authHeaderListener, { urls, types: ['xmlhttprequest'] }, ['requestHeaders', 'extraHeaders']);
+  } catch (_) {
+    // 某个 pattern 非法时回退到全量，保证功能不失效
+    try {
+      chrome.webRequest.onBeforeSendHeaders.addListener(authHeaderListener, { urls: ['<all_urls>'], types: ['xmlhttprequest'] }, ['requestHeaders', 'extraHeaders']);
+    } catch (_2) { /* ignore */ }
+  }
+}
+
+// 启动时按当前白名单注册，并在白名单变化时重建
+storageGet<string[]>(WHITELIST_KEY, []).then(registerAuthListener);
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === 'local' && changes[WHITELIST_KEY]) {
+    registerAuthListener(changes[WHITELIST_KEY].newValue || []);
+  }
+});
+
+// 读取某 URL 对应 origin 的认证头缓存（优先内存，miss 时查 session）
+function getAuthHeaders(url: string): Promise<Record<string, string>> {
+  let origin: string;
+  try { origin = new URL(url).origin; } catch { return Promise.resolve({}); }
+  if (authCache.has(origin)) return Promise.resolve(authCache.get(origin)!);
+  return new Promise((r) => {
+    try {
+      chrome.storage.session.get(AUTH_SESSION_KEY, (res) => {
+        const all = res?.[AUTH_SESSION_KEY] || {};
+        r(all[origin] || {});
+      });
+    } catch { r({}); }
+  });
+}
+
+// 常见二级公共后缀：这些情况下注册域应取三段（如 example.com.cn）
+const TWO_LEVEL_SUFFIX = new Set([
+  'com.cn', 'net.cn', 'org.cn', 'gov.cn', 'edu.cn',
+  'co.uk', 'org.uk', 'gov.uk', 'co.jp', 'co.kr',
+  'com.hk', 'com.tw', 'com.au', 'com.sg',
+]);
+
+// 推断可注册域（父域）。IP / localhost / 已是两段域 → 返回 null（无需兜底）
+function getBaseDomain(hostname: string): string | null {
+  if (!hostname || hostname.includes(':') || /^[\d.]+$/.test(hostname) || hostname === 'localhost') return null;
+  const parts = hostname.split('.');
+  if (parts.length <= 2) return null;
+  const lastTwo = parts.slice(-2).join('.');
+  if (TWO_LEVEL_SUFFIX.has(lastTwo)) return parts.slice(-3).join('.');
+  return lastTwo;
+}
+
+// 获取该 URL 可用的 Cookie：精确匹配 + 父域兜底（解决登录域与接口子域不一致）
+async function getCookiesForUrl(url: string): Promise<chrome.cookies.Cookie[]> {
+  const primary = (await new Promise<chrome.cookies.Cookie[]>((r) => chrome.cookies.getAll({ url }, (c) => r(c || [])))) || [];
+  let host = '';
+  try { host = new URL(url).hostname; } catch { return primary; }
+  const base = getBaseDomain(host);
+  if (!base) return primary;
+  const byDomain = (await new Promise<chrome.cookies.Cookie[]>((r) => chrome.cookies.getAll({ domain: base }, (c) => r(c || [])))) || [];
+  // 按 name 合并，精确匹配（primary）覆盖父域兜底
+  const map = new Map<string, chrome.cookies.Cookie>();
+  for (const c of byDomain) map.set(c.name, c);
+  for (const c of primary) map.set(c.name, c);
+  return [...map.values()];
+}
+
 // ===== Rule matching =====
 function matchRule(rule: Rule, url: string, method: string, rtype: string): boolean {
   if (!rule.enabled) return false;
@@ -198,7 +373,7 @@ chrome.runtime.onMessage.addListener((msg: any, _sender: any, sendResponse: any)
 
   // ---- API Tester: proxy request (bypasses CORS) ----
   if (t === 'API_TEST_REQUEST') {
-    const { method = 'GET', url = '', headers = {}, body } = (msg.payload || {}) as { method: string; url: string; headers: Record<string, string>; body?: string };
+    const { method = 'GET', url = '', headers = {}, body, refreshCookie = false } = (msg.payload || {}) as { method: string; url: string; headers: Record<string, string>; body?: string; refreshCookie?: boolean };
     if (!url || !/^https?:\/\//i.test(url)) {
       sendResponse({ error: '仅支持 http:// 和 https:// 协议' });
       return false;
@@ -224,17 +399,27 @@ chrome.runtime.onMessage.addListener((msg: any, _sender: any, sendResponse: any)
     async function doRequest() {
       const hdrs = new Headers(headers || {});
 
-      // Attach browser cookies if user hasn't set a Cookie header
-      if (!hdrs.has('Cookie')) {
+      // Attach / refresh browser cookies.
+      // - refreshCookie=true: always override the Cookie header with current browser cookies
+      //   (fixes stale hardcoded login state in saved requests).
+      // - otherwise: only attach when the user hasn't set a Cookie header.
+      if (refreshCookie || !hdrs.has('Cookie')) {
         try {
-          const cookies = await new Promise<chrome.cookies.Cookie[]>((r) =>
-            chrome.cookies.getAll({ url }, r)
-          );
+          const cookies = await getCookiesForUrl(url);
           if (cookies && cookies.length > 0) {
             const cookieStr = cookies.map(c => `${c.name}=${c.value}`).join('; ');
             hdrs.set('Cookie', cookieStr);
           }
         } catch (_) { /* cookies permission may be missing */ }
+      }
+
+      // refreshCookie 语义为「同步登录态」：一并用捕获到的最新认证头覆盖同名头，
+      // 解决 Authorization / token 过期导致的登录态丢失。
+      if (refreshCookie) {
+        try {
+          const auth = await getAuthHeaders(url);
+          for (const [k, v] of Object.entries(auth)) if (v) hdrs.set(k, v);
+        } catch (_) { /* ignore */ }
       }
 
       const init: RequestInit = { method, headers: hdrs };
@@ -266,6 +451,50 @@ chrome.runtime.onMessage.addListener((msg: any, _sender: any, sendResponse: any)
     }
 
     checkSSRF().then(ok => { if (ok) doRequest(); });
+    return true;
+  }
+
+  // ---- API Tester: fetch current browser cookies for a URL ----
+  if (t === 'GET_BROWSER_COOKIES') {
+    const url = (msg.payload?.url || '') as string;
+    if (!url || !/^https?:\/\//i.test(url)) {
+      sendResponse({ error: '请先填写有效的 http(s) URL' });
+      return true;
+    }
+    try {
+      chrome.cookies.getAll({ url }, (cookies) => {
+        if (chrome.runtime.lastError) {
+          sendResponse({ error: chrome.runtime.lastError.message || '读取 Cookie 失败' });
+          return;
+        }
+        const list = cookies || [];
+        const cookieStr = list.map(c => `${c.name}=${c.value}`).join('; ');
+        sendResponse({ cookieStr, count: list.length });
+      });
+    } catch (err: unknown) {
+      sendResponse({ error: '读取 Cookie 异常: ' + ((err as Error)?.message || String(err)) });
+    }
+    return true;
+  }
+
+  // ---- API Tester: fetch full login state (cookies + captured auth headers) ----
+  if (t === 'GET_LOGIN_STATE') {
+    const url = (msg.payload?.url || '') as string;
+    if (!url || !/^https?:\/\//i.test(url)) {
+      sendResponse({ error: '请先填写有效的 http(s) URL' });
+      return true;
+    }
+    (async () => {
+      let cookieStr = '';
+      let cookieCount = 0;
+      try {
+        const list = await getCookiesForUrl(url);
+        cookieStr = list.map(c => `${c.name}=${c.value}`).join('; ');
+        cookieCount = list.length;
+      } catch (_) { /* cookies permission may be missing */ }
+      const authHeaders = await getAuthHeaders(url);
+      sendResponse({ cookieStr, cookieCount, authHeaders });
+    })();
     return true;
   }
 
