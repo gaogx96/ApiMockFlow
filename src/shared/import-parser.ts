@@ -7,7 +7,9 @@ export function detectFormat(input: string): ImportFormat {
   if (/^curl\s/i.test(t)) return 'curl';
   if (/^(?:GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)\s+https?:\/\//i.test(t)) return 'httpie';
   if (/^https?\s+/i.test(t) && !/^https?:\/\//i.test(t)) return 'httpie';
-  if (/\bopenapi\s*:\s*["']?3\./i.test(t) || (/\b"paths"\s*:/.test(t) && /\b"responses"\s*:/.test(t))) return 'openapi';
+  // 同时兼容 YAML（openapi: 3.x）与 JSON（"openapi": "3.x"）；
+  // 注意不能用 \b"paths"——引号前不构成单词边界，会永远匹配失败。
+  if (/openapi["']?\s*:\s*["']?3\./i.test(t) || (/"paths"\s*:/.test(t) && /"responses"\s*:/.test(t))) return 'openapi';
   return 'unknown';
 }
 
@@ -156,7 +158,8 @@ export function parseHttpie(input: string): ApiRequest {
   let hm: RegExpExecArray | null;
   while ((hm = hdrRe.exec(t)) !== null) {
     const k = hm[1], v = hm[2];
-    if (!/^https?:/i.test(k) && !/^(GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)$/i.test(k)) {
+    // 排除从 URL(https)/method 误切出的伪 header
+    if (!/^https?$/i.test(k) && !/^(GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)$/i.test(k)) {
       result.headers[k] = v;
     }
   }
