@@ -98,9 +98,35 @@ export default function RuleEditor({ rule, groups, onSave, onCancel, prefill }: 
     }
     for (let i = 0; i < actions.length; i++) {
       const a = actions[i];
+      const v = (a.value ?? '').trim();
+
+      // ---- key（匹配文本 / 正则 / Header 名 / 参数名）校验 ----
       if (a.operate === 'replace') {
         if (!a.key || !a.key.trim()) { errs[`action_${i}_key`] = '替换操作必须提供匹配文本'; }
         else { try { new RegExp(a.key); } catch { errs[`action_${i}_key`] = '正则表达式格式无效'; } }
+      } else if (a.type === 'modifyRequestHeader' || a.type === 'modifyResponseHeader') {
+        // set/append/remove 都需要 Header 名称；尤其 remove 留空会匹配并删掉所有同类响应头
+        if (!a.key || !a.key.trim()) errs[`action_${i}_key`] = '请填写 Header 名称';
+      } else if (a.type === 'modifyRequestUrl' && a.operate === 'remove') {
+        if (!a.key || !a.key.trim()) errs[`action_${i}_key`] = '请填写要移除的参数名';
+      }
+
+      // ---- value（必填 + 值域）校验：避免存下"看似生效、实则空操作"的规则 ----
+      if (a.type === 'redirect') {
+        if (!v) errs[`action_${i}_value`] = '请填写重定向目标 URL';
+        else { try { new URL(v); } catch { errs[`action_${i}_value`] = 'URL 格式无效，需以 http:// 或 https:// 开头'; } }
+      } else if (a.type === 'modifyStatusCode') {
+        const n = parseInt(v);
+        if (!v) errs[`action_${i}_value`] = '请填写 HTTP 状态码';
+        else if (isNaN(n) || n < 200 || n > 599) errs[`action_${i}_value`] = '状态码必须是 200-599 之间的数字';
+      } else if (a.type === 'delay') {
+        const n = parseInt(v);
+        if (!v) errs[`action_${i}_value`] = '请填写延迟毫秒数';
+        else if (isNaN(n) || n < 0) errs[`action_${i}_value`] = '延迟必须是非负整数（毫秒）';
+      } else if (a.type === 'injectScript') {
+        if (!v) errs[`action_${i}_value`] = '请填写要注入的脚本内容';
+      } else if (a.type === 'modifyRequestUrl' && a.operate === 'set') {
+        if (!v) errs[`action_${i}_value`] = '请填写新的完整 URL';
       }
     }
     if (showNewGroup && !newGroupName.trim()) errs.newGroup = '请输入新分组名称';
@@ -183,7 +209,7 @@ export default function RuleEditor({ rule, groups, onSave, onCancel, prefill }: 
     if (!v) return null;
     if (action.type === 'modifyStatusCode') {
       const n = parseInt(v);
-      if (isNaN(n) || n < 100 || n > 599) return '状态码必须是 100-599 之间的数字';
+      if (isNaN(n) || n < 200 || n > 599) return '状态码必须是 200-599 之间的数字';
     }
     if (action.type === 'delay') {
       const n = parseInt(v);
@@ -323,7 +349,9 @@ export default function RuleEditor({ rule, groups, onSave, onCancel, prefill }: 
                   // Smart URL detection on paste
                   const text = e.clipboardData.getData('text').trim();
                   if (!text) return;
-                  const hasRegex = /[.*+?^${}()|[\]\\]/.test(text.replace(/https?:\/\//, ''));
+                  // 只在出现明确的正则元字符时才切正则模式。
+                  // 不含 . 和 ? —— 普通 URL 几乎都带点/问号，否则任何 URL 都会被误判为正则。
+                  const hasRegex = /[*+^${}()|[\]\\]/.test(text.replace(/https?:\/\//, ''));
                   const isFullUrl = /^https?:\/\//i.test(text);
                   const isDomain = /^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/.test(text) && !text.includes('/');
                   if (hasRegex) {
@@ -468,11 +496,13 @@ export default function RuleEditor({ rule, groups, onSave, onCancel, prefill }: 
                       <textarea
                         placeholder={getValuePlaceholder(action)}
                         value={action.value}
-                        onChange={(e) => updateAction(i, 'value', e.target.value)}
+                        onChange={(e) => { updateAction(i, 'value', e.target.value); clearError(`action_${i}_value`); }}
                         rows={action.type === 'injectScript' ? 6 : action.type.includes('Body') ? 5 : (action.type.includes('Header') || action.type === 'modifyRequestUrl') ? 1 : 2}
-                        className="form-textarea text-xs"
+                        className={`form-textarea text-xs w-full ${errors[`action_${i}_value`] ? 'border-red-400 focus:border-red-400 focus:ring-red-100' : ''}`}
                       />
                       {(() => {
+                        const err = errors[`action_${i}_value`];
+                        if (err) return <p className="text-xs text-red-500 mt-1">{err}</p>;
                         const w = getValueWarning(action);
                         return w ? <p className="text-xs text-amber-500 dark:text-amber-400 mt-1">{w}</p> : null;
                       })()}

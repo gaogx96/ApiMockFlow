@@ -293,7 +293,14 @@ describe('edge cases', () => {
     const result = applyResp(200, 'OK', {}, 'body', [
       makeAction({ type: 'modifyStatusCode', operate: 'set', value: '999' }),
     ]);
-    expect(result.status).toBe(200); // 999 is out of 100-599 range
+    expect(result.status).toBe(200); // 999 is out of 200-599 range
+  });
+
+  it('modifyStatusCode with 1xx value is ignored (Response 构造器不支持 <200)', () => {
+    const result = applyResp(200, 'OK', {}, 'body', [
+      makeAction({ type: 'modifyStatusCode', operate: 'set', value: '101' }),
+    ]);
+    expect(result.status).toBe(200);
   });
 
   it('modifyStatusCode with non-numeric value is ignored', () => {

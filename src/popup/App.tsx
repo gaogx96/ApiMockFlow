@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { BoltIcon, BeakerIcon, SunIcon, MoonIcon, DocumentMagnifyingGlassIcon, EyeIcon, EyeSlashIcon } from '@heroicons/react/24/outline';
+import { BoltIcon, BeakerIcon, SunIcon, MoonIcon, DocumentMagnifyingGlassIcon, EyeIcon, EyeSlashIcon, ArrowTopRightOnSquareIcon } from '@heroicons/react/24/outline';
 import { AppState, Rule, RuleMatch } from '../shared/types';
 import RuleList from './pages/RuleList';
 import RuleEditor from './pages/RuleEditor';
@@ -8,6 +8,10 @@ import ApiTester from './pages/ApiTester';
 import NetworkLog from './pages/NetworkLog';
 
 export type Page = 'list' | 'editor' | 'apitest' | 'networklog';
+
+// 独立窗口模式（由工具栏 popup 弹出的 chrome.windows popup，?window=1）：
+// 此时隐藏「独立窗口」按钮，并让根容器填满整个窗口。
+const isPanelWindow = new URLSearchParams(location.search).get('window') === '1';
 
 export default function App() {
   const [page, setPage] = useState<Page>('list');
@@ -99,7 +103,7 @@ export default function App() {
   const activeRuleCount = state.rules.filter((r) => r.enabled).length;
 
   return (
-    <div className="flex flex-col h-full" style={{ height: '580px' }}>
+    <div className="flex flex-col h-full" style={{ height: isPanelWindow ? '100vh' : '580px' }}>
       {/* Header bar */}
       <div className="header-bar">
         <div className="flex items-center gap-2">
@@ -107,6 +111,15 @@ export default function App() {
           <span className="text-sm font-bold text-white tracking-tight">ApiMockFlow</span>
         </div>
         <div className="flex items-center gap-2 ml-auto">
+          {!isPanelWindow && (
+            <button
+              onClick={() => chrome.runtime.sendMessage({ type: 'OPEN_PANEL' }, () => window.close())}
+              className="flex items-center text-white opacity-70 hover:opacity-100 transition-opacity p-0.5"
+              title="在独立窗口中打开（切换标签页不关闭）"
+            >
+              <ArrowTopRightOnSquareIcon className="w-4 h-4" />
+            </button>
+          )}
           <div
             className={`toggle-switch ${state.globalEnabled ? 'active' : ''}`}
             onClick={toggleGlobal}
@@ -152,7 +165,7 @@ export default function App() {
 
       {/* Main content */}
       <main className="flex-1 flex flex-col overflow-hidden bg-slate-100 dark:bg-slate-900">
-        <ErrorBoundary>
+        <ErrorBoundary key={page}>
         {page === 'list' && (
           <RuleList state={state} onRefresh={refreshState} onEditRule={handleEditRule} />
         )}

@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { MagnifyingGlassIcon, TrashIcon, PlusIcon, ChevronDownIcon, ChevronRightIcon } from '@heroicons/react/24/outline';
 import { InterceptedRequest, RuleMatch } from '../../shared/types';
-import { showConfirm } from '../../shared/toast';
+import { showConfirm, showToast } from '../../shared/toast';
 
 interface Props {
   onCreateRule: (prefill: Partial<RuleMatch>) => void;
@@ -14,14 +14,17 @@ export default function NetworkLog({ onCreateRule }: Props) {
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [autoRefresh, setAutoRefresh] = useState(true);
   const timerRef = useRef<any>(null);
+  const invalidatedRef = useRef(false); // 上下文失效只提示一次
 
   const fetchLogs = () => {
     chrome.runtime.sendMessage({ type: 'LOG_GET' }, (res) => {
       const err = chrome.runtime.lastError;
       if (err) {
-        // 白盒化：context invalidated 时停止轮询并提示，而非静默吞掉
-        if (err.message?.includes('Extension context invalidated')) {
+        // 白盒化：context invalidated（扩展被重载/更新）时停止轮询并明确提示，而非静默吞掉
+        if (err.message?.includes('Extension context invalidated') && !invalidatedRef.current) {
+          invalidatedRef.current = true;
           setAutoRefresh(false);
+          showToast('扩展已重新加载，已暂停自动刷新，请重新打开插件面板', 'warning', 5000);
         }
         return;
       }
@@ -39,10 +42,14 @@ export default function NetworkLog({ onCreateRule }: Props) {
 
   const clearLogs = async () => {
     if (!await showConfirm('确定清空所有拦截日志？')) return;
+    // 不再乐观清空：以后台确认成功为准，失败时保留日志并提示
     try {
-      await chrome.runtime.sendMessage({ type: 'LOG_CLEAR' });
-    } catch (_) {}
-    setLogs([]);
+      const res = await chrome.runtime.sendMessage({ type: 'LOG_CLEAR' });
+      if (res?.success) setLogs([]);
+      else showToast('清空失败，请重试', 'error');
+    } catch (_) {
+      showToast('清空失败：扩展上下文可能已失效，请重新打开面板', 'error');
+    }
   };
 
   const filtered = logs.filter((log) => {
@@ -181,7 +188,7 @@ export default function NetworkLog({ onCreateRule }: Props) {
           <div className="divide-y divide-gray-50 dark:divide-gray-800">
             {filtered.map((log) => {
               const isExpanded = expandedId === log.id;
-              const respStatus = log.modifiedResponse?.status || log.originalResponse?.status;
+              const respStatus = log.modifiedResponse?.status ?? log.originalResponse?.status;
 
               return (
                 <div key={log.id} className="hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors">

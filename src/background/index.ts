@@ -193,11 +193,12 @@ function getAuthHeaders(url: string): Promise<Record<string, string>> {
   });
 }
 
-// 常见二级公共后缀：这些情况下注册域应取三段（如 example.com.cn）
-const TWO_LEVEL_SUFFIX = new Set([
-  'com.cn', 'net.cn', 'org.cn', 'gov.cn', 'edu.cn',
-  'co.uk', 'org.uk', 'gov.uk', 'co.jp', 'co.kr',
-  'com.hk', 'com.tw', 'com.au', 'com.sg',
+// 常见「二级公共后缀」关键词：当倒数第二段是这些、且顶级域是 2 字母国家码时，
+// 注册域应取三段（如 example.com.cn / example.co.uk / example.com.br / example.co.in）。
+// 用启发式取代硬编码后缀表，覆盖 br/in/mx 等未列出的国家，避免把注册域误判成
+// com.br 之类的公共后缀，从而在父域兜底时对整个 *.com.br 过度抓取 Cookie（跨站泄露）。
+const SLD_KEYWORDS = new Set([
+  'com', 'net', 'org', 'gov', 'edu', 'co', 'ac', 'or', 'ne', 'go', 'ltd', 'me', 'biz', 'info',
 ]);
 
 // 推断可注册域（父域）。IP / localhost / 已是两段域 → 返回 null（无需兜底）
@@ -205,9 +206,13 @@ function getBaseDomain(hostname: string): string | null {
   if (!hostname || hostname.includes(':') || /^[\d.]+$/.test(hostname) || hostname === 'localhost') return null;
   const parts = hostname.split('.');
   if (parts.length <= 2) return null;
-  const lastTwo = parts.slice(-2).join('.');
-  if (TWO_LEVEL_SUFFIX.has(lastTwo)) return parts.slice(-3).join('.');
-  return lastTwo;
+  const tld = parts[parts.length - 1];
+  const sld = parts[parts.length - 2];
+  // TLD 是 2 字母国家码且二级段是公共后缀关键词 → 注册域取三段
+  if (tld.length === 2 && SLD_KEYWORDS.has(sld.toLowerCase())) {
+    return parts.slice(-3).join('.');
+  }
+  return parts.slice(-2).join('.');
 }
 
 // 获取该 URL 可用的 Cookie：精确匹配 + 父域兜底（解决登录域与接口子域不一致）
@@ -223,6 +228,54 @@ async function getCookiesForUrl(url: string): Promise<chrome.cookies.Cookie[]> {
   for (const c of byDomain) map.set(c.name, c);
   for (const c of primary) map.set(c.name, c);
   return [...map.values()];
+}
+
+// ===== SSRF 主机判定 =====
+// 把十进制/十六进制/八进制等各种 IPv4 写法归一后再判定内网，堵住
+// http://2130706433/ (=127.0.0.1)、http://0x7f000001/、http://0177.0.0.1/ 之类的编码绕过。
+function ipv4ToInt(host: string): number | null {
+  const toNum = (p: string): number | null => {
+    if (/^0x[0-9a-f]+$/i.test(p)) return parseInt(p, 16);
+    if (/^0[0-7]+$/.test(p)) return parseInt(p, 8);
+    if (/^\d+$/.test(p)) return parseInt(p, 10);
+    return null;
+  };
+  const parts = host.split('.');
+  if (parts.length === 4) {
+    let n = 0;
+    for (const p of parts) { const v = toNum(p); if (v === null || v < 0 || v > 255) return null; n = n * 256 + v; }
+    return n >>> 0;
+  }
+  if (parts.length === 1) { const v = toNum(parts[0]); if (v === null || v < 0 || v > 0xffffffff) return null; return v >>> 0; }
+  return null; // 2/3 段的奇异写法不常见，交给下游解析
+}
+
+function isPrivateIpv4Int(n: number): boolean {
+  const a = (n >>> 24) & 255, b = (n >>> 16) & 255;
+  if (a === 127) return true;                        // 127.0.0.0/8 loopback
+  if (a === 10) return true;                          // 10.0.0.0/8
+  if (a === 0) return true;                           // 0.0.0.0/8（含裸 0）
+  if (a === 192 && b === 168) return true;            // 192.168.0.0/16
+  if (a === 172 && b >= 16 && b <= 31) return true;   // 172.16.0.0/12
+  if (a === 169 && b === 254) return true;            // 169.254.0.0/16（含 169.254.169.254 元数据）
+  return false;
+}
+
+// 是否为应拦截的内网/环回主机（已归一各种编码）。allowInternalNetwork 开启时不调用。
+function isBlockedHost(rawHost: string): boolean {
+  const host = (rawHost || '').replace(/^\[|\]$/g, '').toLowerCase();
+  if (!host) return true; // 空主机拦掉
+  // 名称型环回：localhost / *.localhost / 末尾带点
+  if (host === 'localhost' || host === 'localhost.' || host.endsWith('.localhost')) return true;
+  // IPv6 环回 / 未指定 / 链路本地(fe80::/10) / 唯一本地(fc00::/7)
+  if (host === '::1' || host === '::' || /^fe80:/.test(host) || /^f[cd][0-9a-f]{2}:/.test(host)) return true;
+  // IPv4-mapped IPv6，如 ::ffff:127.0.0.1
+  const mapped = host.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
+  if (mapped) { const n = ipv4ToInt(mapped[1]); if (n !== null && isPrivateIpv4Int(n)) return true; }
+  // 各种进制写法的 IPv4（点分/单整数/十六进制/八进制）
+  const asInt = ipv4ToInt(host);
+  if (asInt !== null && isPrivateIpv4Int(asInt)) return true;
+  return false;
 }
 
 // ===== Rule matching =====
@@ -254,9 +307,45 @@ async function getMatching(url: string, method: string, rtype: string): Promise<
   return rules.filter(r => eg.has(r.groupId) && matchRule(r, url, method, rtype));
 }
 
+// ===== Detached panel window =====
+// 把整个 popup UI 弹成独立窗口，切换浏览器标签页不会关闭它。
+// 单例：已存在则聚焦，窗口 id 存 session（跨 SW 重启存活，浏览器关闭即清）。
+const PANEL_WINDOW_KEY = 'panelWindowId';
+const PANEL_W = 680;
+const PANEL_H = 740;
+
+async function openPanelWindow(): Promise<void> {
+  const url = chrome.runtime.getURL('popup.html?window=1');
+  const saved: number | undefined = await new Promise((res) =>
+    chrome.storage.session.get(PANEL_WINDOW_KEY, (r) => res(r?.[PANEL_WINDOW_KEY]))
+  );
+  if (typeof saved === 'number') {
+    try {
+      await chrome.windows.get(saved);
+      await chrome.windows.update(saved, { focused: true });
+      return;
+    } catch (_) { /* 窗口已关闭，继续新建 */ }
+  }
+  const created = await chrome.windows.create({ url, type: 'popup', width: PANEL_W, height: PANEL_H });
+  if (created?.id != null) chrome.storage.session.set({ [PANEL_WINDOW_KEY]: created.id });
+}
+
+chrome.windows.onRemoved.addListener((closedId) => {
+  chrome.storage.session.get(PANEL_WINDOW_KEY, (r) => {
+    if (r?.[PANEL_WINDOW_KEY] === closedId) chrome.storage.session.remove(PANEL_WINDOW_KEY);
+  });
+});
+
 // ===== Message handler =====
 chrome.runtime.onMessage.addListener((msg: any, _sender: any, sendResponse: any) => {
   const t = msg.type;
+
+  if (t === 'OPEN_PANEL') {
+    openPanelWindow()
+      .then(() => sendResponse({ success: true }))
+      .catch((err: any) => sendResponse({ success: false, error: err?.message || 'unknown' }));
+    return true;
+  }
 
   if (t === 'GET_MATCHING_RULES') {
     const { url = '', method = '', resourceType = '' } = msg.payload || {};
@@ -383,11 +472,9 @@ chrome.runtime.onMessage.addListener((msg: any, _sender: any, sendResponse: any)
       return storageGet<boolean>('allowInternalNetwork', false).then(allowInternal => {
         if (allowInternal) return true; // user allowed, skip check
         try {
-          const parsedUrl = new URL(url);
-          const host = parsedUrl.hostname.replace(/^\[|\]$/g, '');
-          const blocked = ['127.0.0.1', '0.0.0.0', '169.254.169.254', 'localhost', '::1', '::ffff:127.0.0.1'];
-          if (blocked.includes(host) || /^10\./.test(host) || /^192\.168\./.test(host) || /^172\.(1[6-9]|2\d|3[01])\./.test(host) || /^fe80:/i.test(host) || /^f[cd]/i.test(host)) {
-            sendResponse({ error: '不允许访问内网地址' });
+          const host = new URL(url).hostname;
+          if (isBlockedHost(host)) {
+            sendResponse({ error: '不允许访问内网地址（如需访问请点击盾牌图标放行内网）' });
             return false;
           }
         } catch (_) {}

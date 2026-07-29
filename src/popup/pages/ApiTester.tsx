@@ -24,6 +24,7 @@ interface TabData {
   error: string;
   loading: boolean;
   autoRefreshCookie: boolean;
+  activeSubTab: 'headers' | 'body' | 'response' | 'history' | 'saved';
 }
 
 function createTab(name?: string): TabData {
@@ -34,6 +35,7 @@ function createTab(name?: string): TabData {
     headers: [['', '']], body: '', bodyType: 'raw',
     response: null, error: '', loading: false,
     autoRefreshCookie: false,
+    activeSubTab: 'headers',
   };
 }
 
@@ -44,7 +46,6 @@ interface Props {
 export default function ApiTester({ onCreateRule }: Props) {
   const [tabs, setTabs] = useState<TabData[]>([createTab()]);
   const [activeIdx, setActiveIdx] = useState(0);
-  const [activeSubTab, setActiveSubTab] = useState<'headers' | 'body' | 'response' | 'history' | 'saved'>('headers');
   const [history, setHistory] = useState<ApiHistoryItem[]>([]);
   const [saved, setSaved] = useState<SavedRequest[]>([]);
   const [importText, setImportText] = useState('');
@@ -201,7 +202,7 @@ export default function ApiTester({ onCreateRule }: Props) {
     updateTab('loading', true);
     updateTab('error', '');
     updateTab('response', null);
-    setActiveSubTab('response');
+    updateTab('activeSubTab', 'response');
 
     const h = getHeadersRecord();
     if (tab.body && !hasContentType(h)) {
@@ -248,7 +249,7 @@ export default function ApiTester({ onCreateRule }: Props) {
     updateTab('autoRefreshCookie', autoRefresh);
     updateTab('response', null);
     updateTab('error', '');
-    setActiveSubTab('headers');
+    updateTab('activeSubTab', 'headers');
   }
 
   function addTab(name?: string) {
@@ -267,8 +268,21 @@ export default function ApiTester({ onCreateRule }: Props) {
 
   function handleImport() {
     const result = parseImport(importText);
-    if (result.requests.length === 0) { updateTab('error', '无法解析输入内容，请检查格式'); return; }
+    // 解析不出任何请求：按识别到的格式给出针对性提示（toast 不受当前子标签页影响）
+    if (result.requests.length === 0) {
+      if (result.format === 'openapi') {
+        showToast('检测到 OpenAPI，但未解析出接口。当前仅支持 JSON，若为 YAML 请先转成 JSON，或确认 paths 字段存在', 'error', 6000);
+      } else {
+        showToast('无法识别输入格式，请粘贴 cURL、HTTPie 或 OpenAPI(JSON)', 'error');
+      }
+      return;
+    }
+    // curl/httpie 恒返回 1 条，但可能没解析出 URL（命令残缺）
     if (result.requests.length === 1) {
+      if (!result.requests[0].url) {
+        showToast('未能从命令中解析出有效的 http(s) URL，请检查粘贴内容', 'error');
+        return;
+      }
       loadRequestToTab(result.requests[0]);
       setImportText('');
       setShowImport(false);
@@ -288,9 +302,9 @@ export default function ApiTester({ onCreateRule }: Props) {
       t.headers = h;
       t.body = r.body || '';
       t.bodyType = r.bodyType || 'raw';
+      setActiveIdx(prev.length);
       return [...prev, t];
     });
-    setActiveIdx(tabs.length);
     setImportedReqs(prev => prev.filter(x => x !== r));
     if (importedReqs.length <= 1) { setImportText(''); setShowImport(false); }
   }
@@ -490,9 +504,9 @@ export default function ApiTester({ onCreateRule }: Props) {
         {SUB_TABS.map(st => (
           <button key={st.key}
             className={`px-2.5 py-1.5 text-xs font-medium border-b-2 transition-colors ${
-              activeSubTab === st.key ? 'border-primary-500 text-primary-600' : 'border-transparent text-gray-500 hover:text-gray-700'
+              tab.activeSubTab === st.key ? 'border-primary-500 text-primary-600' : 'border-transparent text-gray-500 hover:text-gray-700'
             }`}
-            onClick={() => setActiveSubTab(st.key as any)}>
+            onClick={() => updateTab('activeSubTab', st.key as any)}>
             {st.label}
             {st.badge && <span className="ml-1 text-gray-400">{st.badge}</span>}
           </button>
@@ -501,12 +515,12 @@ export default function ApiTester({ onCreateRule }: Props) {
 
       {/* Content */}
       <div className="flex-1 overflow-y-auto">
-        {activeSubTab === 'headers' && (
+        {tab.activeSubTab === 'headers' && (
           <div className="p-2 space-y-1">
             <div className="flex items-center gap-2 mb-1.5 pb-1.5 border-b border-gray-100 dark:border-slate-700">
-              <button onClick={syncLoginState} disabled={syncingCookie}
-                className="flex items-center gap-1 px-2 py-1 text-xs border border-gray-200 dark:border-slate-700 rounded-md text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800 disabled:opacity-50"
-                title="从浏览器读取该域名当前有效的 Cookie 及捕获到的 Authorization/token 认证头，写入请求头">
+              <button onClick={syncLoginState} disabled={syncingCookie || !tab.url.trim()}
+                className="flex items-center gap-1 px-2 py-1 text-xs border border-gray-200 dark:border-slate-700 rounded-md text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800 disabled:opacity-50 disabled:cursor-not-allowed"
+                title={!tab.url.trim() ? '请先填写 URL' : '从浏览器读取该域名当前有效的 Cookie 及捕获到的 Authorization/token 认证头，写入请求头'}>
                 <ArrowPathIcon className={`w-3.5 h-3.5 ${syncingCookie ? 'animate-spin' : ''}`} />
                 {syncingCookie ? '同步中...' : '同步登录态'}
               </button>
@@ -571,7 +585,7 @@ export default function ApiTester({ onCreateRule }: Props) {
           </div>
         )}
 
-        {activeSubTab === 'body' && (
+        {tab.activeSubTab === 'body' && (
           <div className="p-2">
             <div className="flex gap-1.5 mb-1.5">
               {BODY_TYPES.map(bt => (
@@ -592,7 +606,7 @@ export default function ApiTester({ onCreateRule }: Props) {
           </div>
         )}
 
-        {activeSubTab === 'response' && (
+        {tab.activeSubTab === 'response' && (
           <div className="p-2">
             {tab.error && (
               <div className="p-2 bg-red-50 border border-red-200 rounded-md text-xs text-red-600 mb-2 break-all" style={{ fontSize: 11 }}>
@@ -651,7 +665,7 @@ export default function ApiTester({ onCreateRule }: Props) {
           </div>
         )}
 
-        {activeSubTab === 'history' && (
+        {tab.activeSubTab === 'history' && (
           <div className="divide-y divide-gray-50 dark:divide-gray-700">
             {history.length === 0 ? (
               <div className="empty-state" style={{ padding: '24px 16px' }}>
@@ -678,7 +692,7 @@ export default function ApiTester({ onCreateRule }: Props) {
           </div>
         )}
 
-        {activeSubTab === 'saved' && (
+        {tab.activeSubTab === 'saved' && (
           <div className="divide-y divide-gray-50 dark:divide-gray-700">
             {saved.length === 0 ? (
               <div className="empty-state" style={{ padding: '24px 16px' }}>

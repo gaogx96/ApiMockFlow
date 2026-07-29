@@ -21,33 +21,50 @@ export function showToast(message: string, type: ToastType = 'info', duration = 
   const isDark = document.documentElement.classList.contains('dark');
   const colors = isDark ? DARK_COLORS[type] : COLORS[type];
 
+  // 单一容器承载所有 toast：底部居中，column-reverse 让新 toast 出现在最下方、
+  // 旧 toast 向上堆叠，避免多条同时弹出时重叠在同一位置互相遮挡。
+  let container = document.getElementById('toast-container');
+  if (!container) {
+    container = document.createElement('div');
+    container.id = 'toast-container';
+    container.style.cssText = `
+      position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%);
+      z-index: 999999; display: flex; flex-direction: column-reverse;
+      align-items: center; gap: 8px; pointer-events: none; max-width: 92vw;
+    `;
+    document.body.appendChild(container);
+  }
+
   const toast = document.createElement('div');
   toast.textContent = message;
   toast.style.cssText = `
-    position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%);
     padding: 8px 16px; border-radius: 6px; font-size: 13px; font-weight: 500;
-    z-index: 999999; pointer-events: none;
+    pointer-events: none; max-width: 100%; text-align: center; word-break: break-word;
     background: ${colors.bg}; border: 1px solid ${colors.border}; color: ${colors.text};
     box-shadow: 0 2px 8px rgba(0,0,0,0.12);
     animation: toast-in 0.2s ease;
   `;
 
-  // Add animation keyframes if not already present
+  // Add animation keyframes if not already present（水平居中已由容器负责，动画只做上移淡入）
   if (!document.getElementById('toast-style')) {
     const style = document.createElement('style');
     style.id = 'toast-style';
     style.textContent = `
-      @keyframes toast-in { from { opacity: 0; transform: translateX(-50%) translateY(8px); } to { opacity: 1; transform: translateX(-50%) translateY(0); } }
-      @keyframes toast-out { from { opacity: 1; } to { opacity: 0; transform: translateX(-50%) translateY(8px); } }
+      @keyframes toast-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+      @keyframes toast-out { from { opacity: 1; } to { opacity: 0; transform: translateY(8px); } }
     `;
     document.head.appendChild(style);
   }
 
-  document.body.appendChild(toast);
+  container.appendChild(toast);
 
   setTimeout(() => {
     toast.style.animation = 'toast-out 0.2s ease forwards';
-    setTimeout(() => toast.remove(), 200);
+    setTimeout(() => {
+      toast.remove();
+      // 容器空了就移除，避免残留一个空的定位层
+      if (container && container.childElementCount === 0) container.remove();
+    }, 200);
   }, duration);
 }
 

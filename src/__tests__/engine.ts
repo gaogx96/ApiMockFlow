@@ -136,7 +136,8 @@ export function applyResp(status: number, statusText: string, hdrs: Record<strin
         else if (a.operate === 'set') { b = a.value; bodyChanged = true; }
         break;
       case 'modifyStatusCode':
-        if (a.operate === 'set') { const c = parseInt(a.value); if (!isNaN(c) && c >= 100 && c <= 599) { s = c; st = (c >= 200 && c < 300) ? 'OK' : ''; } }
+        // 只接受 200-599：Response 构造器不允许 <200 的状态码（1xx 也无法作为最终响应）
+        if (a.operate === 'set') { const c = parseInt(a.value); if (!isNaN(c) && c >= 200 && c <= 599) { s = c; st = (c >= 200 && c < 300) ? 'OK' : ''; } }
         break;
     }
   }

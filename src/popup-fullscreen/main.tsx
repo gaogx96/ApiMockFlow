@@ -83,6 +83,10 @@ function FullscreenEditor() {
   );
 }
 
+// 全屏页复用 global.css，但 body 的固定尺寸/overflow:hidden 是为工具栏 popup 写的，
+// 会裁掉超出部分导致全屏页无滚动条（拖大响应体后看不到保存按钮）。这里切成整页可滚动。
+document.body.classList.add('fullscreen-page');
+
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
     <FullscreenEditor />

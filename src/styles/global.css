@@ -18,6 +18,21 @@ html.dark body {
   background: #0f172a;
 }
 
+/* 独立窗口模式：内容随窗口大小自适应，不受 popup 的固定尺寸限制 */
+body.panel-window {
+  width: 100%;
+  min-height: 100vh;
+  max-height: none;
+}
+
+/* 全屏编辑页：整页可滚动，避免固定 max-height/overflow:hidden 裁掉底部保存按钮 */
+body.fullscreen-page {
+  width: 100%;
+  min-height: 100vh;
+  max-height: none;
+  overflow: auto;
+}
+
 ::-webkit-scrollbar { width: 5px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: #c1c1c1; border-radius: 3px; }
@@ -197,7 +212,7 @@ select.form-select {
   padding-right: 28px;
   cursor: pointer;
 }
-.form-textarea { resize: vertical; min-height: 36px; font-family: 'SF Mono', 'Fira Code', 'Fira Mono', 'Roboto Mono', 'Consolas', monospace; }
+.form-textarea { resize: both; max-width: 100%; min-height: 36px; font-family: 'SF Mono', 'Fira Code', 'Fira Mono', 'Roboto Mono', 'Consolas', monospace; }
 .form-input.mono { font-family: 'SF Mono', 'Fira Code', 'Fira Mono', 'Roboto Mono', 'Consolas', monospace; }
 .form-label { font-size: 12px; font-weight: 600; color: #374151; margin-bottom: 4px; display: block; }
 

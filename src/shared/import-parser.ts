@@ -83,9 +83,11 @@ export function parseCurl(input: string): ApiRequest {
       if (!result.method || result.method === 'GET') result.method = 'POST';
       continue;
     }
-    // Handle --data=value / --data-raw=value compact form
+    // Handle --data=value / --data-raw=value / --data-urlencode=value compact form
     if (/^--data(?:-raw|-binary|-urlencode)?=(.+)/i.test(t)) {
       result.body = t.substring(t.indexOf('=') + 1);
+      // 紧凑形式的 --data-urlencode= 也要标记为 urlencoded（与带空格形式保持一致）
+      if (/^--data-urlencode=/i.test(t)) result.bodyType = 'urlencoded';
       if (!result.method || result.method === 'GET') result.method = 'POST';
       continue;
     }

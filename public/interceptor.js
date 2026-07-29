@@ -18,8 +18,6 @@ if (window.__APII_INIT) { /* already injected */ } else { window.__APII_INIT = t
   var _containsList = [];  // [{ needle, rule }, ...]
   var _regexList = [];     // [{ re: RegExp, rule }, ...] — PRE-COMPILED
   var _domainMap = {};     // { domain: [rule, ...] }
-  var _methodBuckets = {}; // { GET: [rule, ...], POST: [...], ... }
-  var _allRules = [];      // rules with no method filter
 
   function safeRe(p, f) { try { return new RegExp(p, f); } catch (_) { return null; } }
   function hdrRec(h) { var r = {}; h.forEach(function (v, k) { r[k] = v; }); return r; }
@@ -38,11 +36,13 @@ if (window.__APII_INIT) { /* already injected */ } else { window.__APII_INIT = t
 
   function trunc(s, n) { return s && s.length > n ? s.slice(0, n) : s; }
   function postLog(entry) { try { window.postMessage({ type: 'APII_LOG', entry: entry }, '*'); } catch (_) {} }
+  function logId() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 6); }
+  // 这些状态码按规范不能带响应体；构造 Response 时必须传 null，否则抛错
+  function isNullBodyStatus(s) { return s === 101 || s === 204 || s === 205 || s === 304; }
 
   // === Build optimized matching indexes from rules ===
   function buildIndexes() {
     _exactMap = {}; _containsList = []; _regexList = []; _domainMap = {};
-    _methodBuckets = {}; _allRules = [];
 
     if (GROUPS.length === 0) GROUPS = [{ id: 'default', name: '默认分组', enabled: true, color: '#1677ff' }];
     var enabledGroups = {};
@@ -54,8 +54,6 @@ if (window.__APII_INIT) { /* already injected */ } else { window.__APII_INIT = t
       var r = RULES[i];
       if (!r.enabled || !r.match || !enabledGroups[r.groupId]) continue;
       var m = r.match;
-      var method = m.method || '';
-      var bucket = method ? (_methodBuckets[method] = _methodBuckets[method] || []) : _allRules;
 
       switch (m.matchType) {
         case 'exact':
@@ -65,20 +63,15 @@ if (window.__APII_INIT) { /* already injected */ } else { window.__APII_INIT = t
           break;
         case 'contains':
           _containsList.push({ needle: m.url || '', rule: r });
-          if (method) bucket.push(r); else _allRules.push(r);
           break;
         case 'regex':
           var re = safeRe(m.url || '', '');
-          if (re) {
-            _regexList.push({ re: re, rule: r });
-            if (method) bucket.push(r); else _allRules.push(r);
-          }
+          if (re) _regexList.push({ re: re, rule: r });
           break;
         case 'domain':
           var d = m.url || '';
           if (!_domainMap[d]) _domainMap[d] = [];
           _domainMap[d].push(r);
-          if (method) bucket.push(r); else _allRules.push(r);
           break;
       }
     }
@@ -242,11 +235,12 @@ if (window.__APII_INIT) { /* already injected */ } else { window.__APII_INIT = t
           else if (a.operate === 'replace') { var re2 = safeRe(a.key, 'i'); if (re2) { var ks2 = Object.keys(h); for (var j2 = 0; j2 < ks2.length; j2++) { if (re2.test(ks2[j2])) h[ks2[j2]] = a.value; } } }
           break;
         case 'modifyResponseBody':
-          if (a.operate === 'replace') { var re3 = safeRe(a.key, 'g'); if (re3) b = b.replace(re3, a.value); bodyChanged = true; }
+          if (a.operate === 'replace') { var re3 = safeRe(a.key, 'g'); if (re3) { b = b.replace(re3, a.value); bodyChanged = true; } }
           else if (a.operate === 'set') { b = a.value; bodyChanged = true; }
           break;
         case 'modifyStatusCode':
-          if (a.operate === 'set') { var c = parseInt(a.value); if (!isNaN(c) && c >= 100 && c <= 599) { s = c; st = (c >= 200 && c < 300) ? 'OK' : ''; } }
+          // 只接受 200-599：Response 构造器不允许 <200 的状态码（1xx 也无法作为 fetch 最终响应）
+          if (a.operate === 'set') { var c = parseInt(a.value); if (!isNaN(c) && c >= 200 && c <= 599) { s = c; st = (c >= 200 && c < 300) ? 'OK' : ''; } }
           break;
       }
     }
@@ -257,6 +251,112 @@ if (window.__APII_INIT) { /* already injected */ } else { window.__APII_INIT = t
       if (ct && ct.indexOf('charset') === -1) h['content-type'] = ct + '; charset=utf-8';
     }
     return { status: s, statusText: st, headers: h, body: b };
+  }
+
+  // === Fetch 响应改写（流感知）===
+  // 文本响应缓冲后应用改写（保留日志/diff）；SSE 与二进制不缓冲，直接透传原始字节流，
+  // 避免阻塞 SSE、破坏二进制。opaque/跨域响应无法读写，原样返回。
+  function buildResp(body, rmod, orig) {
+    try { return new Response(body, { status: rmod.status, statusText: rmod.statusText, headers: rmod.headers }); }
+    catch (e) { return orig; } // 例如 1xx 等状态码无法构造 Response，退回原始响应
+  }
+
+  function respFullLog(ctx, origResp, modResp) {
+    return {
+      id: logId(), timestamp: Date.now(), url: ctx.origUrl, method: ctx.method,
+      ruleIds: ctx.ruleIds, ruleNames: ctx.ruleNames,
+      originalRequest: ctx.origReq, modifiedRequest: ctx.modReq,
+      originalResponse: origResp || undefined, modifiedResponse: modResp || undefined,
+      cancelled: false, delayed: ctx.delayMs > 0, delayMs: ctx.delayMs
+    };
+  }
+
+  // 文本类响应（含未声明 content-type）→ 缓冲，以支持正则替换并在日志里展示 body/diff。
+  // SSE 与二进制不算文本：SSE 缓冲会阻塞到流结束，二进制按 UTF-8 解码会损坏。
+  function isTextResponse(ct) {
+    if (!ct) return true; // 无 content-type：多数是文本/JSON，按文本处理以保留日志
+    if (ct.indexOf('text/event-stream') >= 0) return false; // SSE 单独透传
+    return /^text\//.test(ct) ||
+      /^application\/(json|xml|javascript|ecmascript|graphql|x-www-form-urlencoded|manifest\+json|ld\+json|csp-report)\b/.test(ct) ||
+      /^application\/[a-z0-9.+-]*\+(json|xml)\b/.test(ct) ||
+      ct.indexOf('charset=') >= 0;
+  }
+
+  async function handleFetchResp(resp, respA, ctx) {
+    // opaque / error / 无状态响应：既读不到 body 也改不了 header，原样返回
+    if (resp.type === 'opaque' || resp.type === 'opaqueredirect' || resp.type === 'error' || resp.status === 0) {
+      postLog(respFullLog(ctx, undefined, { status: 0, statusText: '跨域/opaque 响应，无法读取或修改', headers: {}, body: '' }));
+      return resp;
+    }
+
+    var ct = '';
+    try { ct = (resp.headers.get('content-type') || '').toLowerCase(); } catch (_) {}
+    var isEventStream = ct.indexOf('text/event-stream') >= 0;
+    var srcHdr = hdrRec(resp.headers); // 原始响应头快照，多处复用
+    var bodyActs = respA.filter(function (a) { return a.type === 'modifyResponseBody'; });
+    var hasReplace = bodyActs.some(function (a) { return a.operate === 'replace'; });
+    var hasSet = bodyActs.some(function (a) { return a.operate === 'set'; });
+
+    // ---- 文本响应：缓冲后应用全部动作（replace / set / 改头改状态），保留完整日志与 diff ----
+    if (isTextResponse(ct)) {
+      try {
+        var rb = await resp.text();
+        var rmod = applyResp(resp.status, resp.statusText, srcHdr, rb, respA);
+        // 回填的是已解码文本 → 原 content-encoding/length 不再成立，删除以免消费方按原编码/长度误判
+        delete rmod.headers['content-encoding'];
+        delete rmod.headers['content-length'];
+        postLog(respFullLog(ctx,
+          { status: resp.status, statusText: resp.statusText, headers: srcHdr, body: trunc(rb, 2000) },
+          { status: rmod.status, statusText: rmod.statusText, headers: rmod.headers, body: trunc(rmod.body, 2000) }));
+        var finalBody = rmod.body;
+        if (finalBody && finalBody.length > 2000000) { finalBody = finalBody.slice(0, 2000000); rmod.headers['content-type'] = 'text/plain; charset=utf-8'; }
+        return buildResp(isNullBodyStatus(rmod.status) ? null : finalBody, rmod, resp);
+      } catch (readErr) {
+        console.warn('[ApiMockFlow] 响应体读取失败，无法应用响应修改:', readErr && readErr.message);
+        postLog(respFullLog(ctx, undefined, { status: 0, statusText: '响应体读取失败(可能流已消费)，修改未生效', headers: {}, body: '' }));
+        return resp;
+      }
+    }
+
+    // ---- 非文本：SSE / 二进制，一律不缓冲 ----
+    // 丢弃 replace 型 body 动作（对未缓冲的流无意义），保留 set 与 header/status 动作
+    var actsForApply = respA.filter(function (a) { return a.type !== 'modifyResponseBody' || a.operate === 'set'; });
+    var kind = isEventStream ? 'SSE' : '二进制';
+
+    // 过滤后无任何可对流生效的动作（即规则只有被跳过的 replace）→ 原样返回，
+    // 不做无谓重建，保留原始 Response 的 type/url/content-length。
+    if (actsForApply.length === 0) {
+      if (hasReplace) console.warn('[ApiMockFlow] ' + kind + '响应无法做正则替换，已跳过响应体改写');
+      postLog(respFullLog(ctx,
+        { status: resp.status, statusText: resp.statusText, headers: srcHdr, body: '(' + kind + '，未改写)' },
+        { status: 0, statusText: kind + '响应不支持正则替换，未改写', headers: {}, body: '' }));
+      return resp;
+    }
+
+    var rmod2 = applyResp(resp.status, resp.statusText, srcHdr, '', actsForApply);
+
+    if (hasSet) {
+      // set 用给定值整体替换 body（用户明确要替换），无需读取原始响应体
+      var fb = rmod2.body;
+      if (fb && fb.length > 2000000) { fb = fb.slice(0, 2000000); rmod2.headers['content-type'] = 'text/plain; charset=utf-8'; }
+      postLog(respFullLog(ctx,
+        { status: resp.status, statusText: resp.statusText, headers: srcHdr, body: '(' + kind + '，未缓冲)' },
+        { status: rmod2.status, statusText: rmod2.statusText, headers: rmod2.headers, body: trunc(rmod2.body, 2000) }));
+      return buildResp(isNullBodyStatus(rmod2.status) ? null : fb, rmod2, resp);
+    }
+
+    // 只有 header/status 修改 → 透传原始 body 流（对 SSE/二进制的 replace 已在上面被过滤跳过）
+    if (hasReplace) {
+      console.warn('[ApiMockFlow] ' + kind + '响应无法做正则替换，已跳过响应体改写，仅应用头/状态并透传');
+    }
+    // 透传的是 fetch 已解码的 body 流，原 content-encoding/length 不再匹配，删掉以免消费方误判
+    delete rmod2.headers['content-encoding'];
+    delete rmod2.headers['content-length'];
+    postLog(respFullLog(ctx,
+      { status: resp.status, statusText: resp.statusText, headers: srcHdr, body: '(' + kind + '流式透传)' },
+      { status: rmod2.status, statusText: rmod2.statusText, headers: rmod2.headers, body: '(流式透传)' }));
+    var passBody = (isNullBodyStatus(rmod2.status) || resp.body == null) ? null : resp.body;
+    return buildResp(passBody, rmod2, resp);
   }
 
   // === Intercepted fetch ===
@@ -270,15 +370,39 @@ if (window.__APII_INIT) { /* already injected */ } else { window.__APII_INIT = t
     var allA = []; for (var i = 0; i < rules.length; i++) allA = allA.concat(rules[i].actions);
     var reqA = allA.filter(function (a) { return REQ.indexOf(a.type) >= 0; });
     var respA = allA.filter(function (a) { return RESP.indexOf(a.type) >= 0; });
-    var origH = init && init.headers ? hdrRec(init.headers instanceof Headers ? init.headers : new Headers(init.headers)) : {};
+
+    // input 可能是 Request 对象：其自带的 headers/body 必须取出——否则重建 init 时
+    // ni.headers 会把 Request 头冲掉，且请求体改写/日志拿不到内容。
+    var reqObj = (input && typeof input === 'object' && !(input instanceof URL) && typeof input.url === 'string') ? input : null;
+    var origH = init && init.headers
+      ? hdrRec(init.headers instanceof Headers ? init.headers : new Headers(init.headers))
+      : (reqObj ? hdrRec(reqObj.headers) : {});
     var origB = extractBody(init && init.body);
+    if (origB === undefined && reqObj && method !== 'GET' && method !== 'HEAD' &&
+        reqA.some(function (a) { return a.type === 'modifyRequestBody'; })) {
+      // 仅当确有请求体改写动作时才克隆读取 Request body（避免为日志白白缓冲大上传体）
+      try { origB = await reqObj.clone().text(); } catch (_) {}
+    }
+
     var origUrl = url;
     var origReq = { headers: origH, body: trunc(origB, 2000) };
     var rm = applyReq(url, origH, origB, reqA);
     var modReq = { url: rm.url, headers: rm.headers, body: trunc(rm.body, 2000) };
+    var ctx = {
+      origUrl: origUrl, method: method,
+      ruleIds: rules.map(function (r) { return r.id; }),
+      ruleNames: rules.map(function (r) { return r.name; }),
+      origReq: origReq, modReq: modReq, delayMs: rm.delayMs
+    };
 
     if (rm.cancelled) {
-      postLog({ id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6), timestamp: Date.now(), url: origUrl, method: method, ruleIds: rules.map(function(r){return r.id;}), ruleNames: rules.map(function(r){return r.name;}), originalRequest: origReq, modifiedRequest: modReq, originalResponse: undefined, modifiedResponse: undefined, cancelled: true, delayed: false, delayMs: 0 });
+      postLog({
+        id: logId(), timestamp: Date.now(), url: origUrl, method: method,
+        ruleIds: ctx.ruleIds, ruleNames: ctx.ruleNames,
+        originalRequest: origReq, modifiedRequest: modReq,
+        originalResponse: undefined, modifiedResponse: undefined,
+        cancelled: true, delayed: false, delayMs: 0
+      });
       return new Response(null, { status: 403, statusText: 'Blocked' });
     }
 
@@ -286,37 +410,24 @@ if (window.__APII_INIT) { /* already injected */ } else { window.__APII_INIT = t
       await new Promise(function (r) { setTimeout(r, rm.delayMs); });
     }
 
-    var ni = init ? Object.assign({}, init) : {};
-    if (rm.url !== url) input = rm.url;
-    ni.headers = rm.headers;
-    if (rm.body !== undefined) ni.body = rm.body;
+    // 请求阶段无任何修改（仅响应规则）→ 原样透传，避免重建 init 冲掉 Request 自带的 headers/body
+    var fetchInput = input, fetchInit = init;
+    if (reqA.length > 0) {
+      var ni = init ? Object.assign({}, init) : {};
+      if (rm.url !== url) fetchInput = rm.url;
+      ni.headers = rm.headers;
+      if (rm.body !== undefined) ni.body = rm.body;
+      fetchInit = ni;
+    }
 
     try {
-      var resp = await NATIVE_FETCH(input, ni);
-
-      if (respA.length > 0) {
-        try {
-          var rb = await resp.text();
-          var origResp = { status: resp.status, statusText: resp.statusText, headers: hdrRec(resp.headers), body: trunc(rb, 2000) };
-          var rmod = applyResp(resp.status, resp.statusText, hdrRec(resp.headers), rb, respA);
-          postLog({ id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6), timestamp: Date.now(), url: origUrl, method: method, ruleIds: rules.map(function(r){return r.id;}), ruleNames: rules.map(function(r){return r.name;}), originalRequest: origReq, modifiedRequest: modReq, originalResponse: origResp, modifiedResponse: { status: rmod.status, statusText: rmod.statusText, headers: rmod.headers, body: trunc(rmod.body, 2000) }, cancelled: false, delayed: rm.delayMs > 0, delayMs: rm.delayMs });
-          var finalBody = rmod.body;
-          if (finalBody && finalBody.length > 2000000) { finalBody = finalBody.slice(0, 2000000); rmod.headers['content-type'] = 'text/plain; charset=utf-8'; }
-          return new Response(finalBody, { status: rmod.status, statusText: rmod.statusText, headers: rmod.headers });
-        } catch (readErr) {
-          // Response body unreadable (opaque, stream consumed, etc.) — return original response
-          console.warn('[ApiMockFlow] 响应体读取失败，无法应用响应修改:', readErr && readErr.message);
-          postLog({ id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6), timestamp: Date.now(), url: origUrl, method: method, ruleIds: rules.map(function(r){return r.id;}), ruleNames: rules.map(function(r){return r.name;}), originalRequest: origReq, modifiedRequest: modReq, originalResponse: undefined, modifiedResponse: { status: 0, statusText: '响应体读取失败(可能是opaque响应或流已消费)，修改未生效', headers: {}, body: '' }, cancelled: false, delayed: rm.delayMs > 0, delayMs: rm.delayMs });
-          return resp;
-        }
-      }
-
-      postLog({ id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6), timestamp: Date.now(), url: origUrl, method: method, ruleIds: rules.map(function(r){return r.id;}), ruleNames: rules.map(function(r){return r.name;}), originalRequest: origReq, modifiedRequest: modReq, originalResponse: undefined, modifiedResponse: undefined, cancelled: false, delayed: rm.delayMs > 0, delayMs: rm.delayMs });
+      var resp = await NATIVE_FETCH(fetchInput, fetchInit);
+      if (respA.length > 0) return await handleFetchResp(resp, respA, ctx);
+      postLog(respFullLog(ctx, undefined, undefined));
       return resp;
     } catch (fetchErr) {
-      // Network error AFTER modification — retry with ORIGINAL request to avoid infinite loop
-      void 0;
-      try { return NATIVE_FETCH(origUrl, init); } catch (_) { throw fetchErr; }
+      // 改写后网络错误 → 用原始 input/init 重试，避免死循环
+      try { return NATIVE_FETCH(input, init); } catch (_) { throw fetchErr; }
     }
   }
 
@@ -367,7 +478,7 @@ if (window.__APII_INIT) { /* already injected */ } else { window.__APII_INIT = t
           // URL redirect: create proxy XHR with timeout and error handling
           var px = new NATIVE_XHR();
           try { px.open(om, rm.url, true); } catch (openErr) {
-            void 0;
+            // 重定向目标 URL 打开失败（如非法 URL）→ 通知调用方网络错误
             self.dispatchEvent(new Event('error'));
             xhrLog(null, null, false);
             return;
@@ -408,11 +519,12 @@ if (window.__APII_INIT) { /* already injected */ } else { window.__APII_INIT = t
               try{Object.defineProperty(self,'readyState',{value:4,writable:true,configurable:true});}catch(_){}
               self.dispatchEvent(new Event('readystatechange'));
               self.dispatchEvent(new Event('load'));
-              if (px.status >= 400) self.dispatchEvent(new Event('error'));
+              // 注意：HTTP 4xx/5xx 是"成功完成的传输"，原生 XHR 只通过 load 事件 + status 暴露，
+              // 不派发 error。此前多派发的 error 会让 axios/jQuery 把正常响应误判为网络错误。
             }
           };
           try { px.send(rm.body !== undefined ? rm.body : body); } catch (sendErr) {
-            void 0;
+            // 发送失败 → 通知调用方网络错误
             self.dispatchEvent(new Event('error'));
             xhrLog(null, null, false);
           }

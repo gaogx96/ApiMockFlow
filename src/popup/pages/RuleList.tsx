@@ -236,16 +236,23 @@ export default function RuleList({ state, onRefresh, onEditRule }: Props) {
 
                     {/* Move + Delete (hover only) */}
                     <div className="rule-hover-actions flex items-center gap-0.5 shrink-0">
-                      {!isFiltered && (
-                        <>
-                          <button className="btn-ghost p-0 leading-none" onClick={(e) => { e.stopPropagation(); moveRule(state.rules.findIndex(r => r.id === rule.id), -1); }} title="上移">
-                            <ChevronUpIcon className="w-3.5 h-3.5" />
-                          </button>
-                          <button className="btn-ghost p-0 leading-none" onClick={(e) => { e.stopPropagation(); moveRule(state.rules.findIndex(r => r.id === rule.id), 1); }} title="下移">
-                            <ChevronDownIcon className="w-3.5 h-3.5" />
-                          </button>
-                        </>
-                      )}
+                      {/* 排序按钮：筛选时禁用而非隐藏（避免按钮位置跳动，并说明原因） */}
+                      <button
+                        className="btn-ghost p-0 leading-none disabled:opacity-30 disabled:cursor-not-allowed"
+                        disabled={isFiltered}
+                        onClick={(e) => { e.stopPropagation(); if (!isFiltered) moveRule(state.rules.findIndex(r => r.id === rule.id), -1); }}
+                        title={isFiltered ? '排序前请先清除搜索/分组筛选' : '上移'}
+                      >
+                        <ChevronUpIcon className="w-3.5 h-3.5" />
+                      </button>
+                      <button
+                        className="btn-ghost p-0 leading-none disabled:opacity-30 disabled:cursor-not-allowed"
+                        disabled={isFiltered}
+                        onClick={(e) => { e.stopPropagation(); if (!isFiltered) moveRule(state.rules.findIndex(r => r.id === rule.id), 1); }}
+                        title={isFiltered ? '排序前请先清除搜索/分组筛选' : '下移'}
+                      >
+                        <ChevronDownIcon className="w-3.5 h-3.5" />
+                      </button>
                       <button className="btn-ghost p-1 text-xs" onClick={(e) => deleteRule(rule.id, e)} title="删除">
                         <TrashIcon className="w-4 h-4" />
                       </button>
