@@ -4,6 +4,7 @@ import { ApiRequest, ApiResponse, ApiHistoryItem, SavedRequest } from '../../sha
 import { parseImport } from '../../shared/import-parser';
 import { generateId } from '../../shared/constants';
 import { showToast } from '../../shared/toast';
+import { repairAndFormatJson, minifyJson } from '../../shared/json-format';
 import { parseJwtExpiry, humanizeDuration } from '../../shared/jwt';
 
 const METHODS = ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'HEAD', 'OPTIONS'];
@@ -342,6 +343,30 @@ export default function ApiTester({ onCreateRule }: Props) {
     try { return JSON.stringify(JSON.parse(s), null, 2); } catch { return s; }
   }
 
+  // 请求体「格式化」按钮：合法则美化；非法则尝试自动修复常见错误并填入，仍失败给带原因/位置的提示
+  function formatBody() {
+    if (!tab.body.trim()) return;
+    const r = repairAndFormatJson(tab.body);
+    if (r.ok) {
+      updateTab('body', r.text);
+      if (r.repaired) showToast('已自动修复并格式化，请核对内容', 'success', 4000);
+    } else {
+      showToast(r.error || '不是合法 JSON', 'warning', 6000);
+    }
+  }
+
+  // 请求体「压缩」按钮：解析后压成一行（同样先尝试修复）
+  function minifyBody() {
+    if (!tab.body.trim()) return;
+    const r = minifyJson(tab.body);
+    if (r.ok) {
+      updateTab('body', r.text);
+      if (r.repaired) showToast('已自动修复并压缩，请核对内容', 'success', 4000);
+    } else {
+      showToast(r.error || '不是合法 JSON', 'warning', 6000);
+    }
+  }
+
   // Simple regex-based JSON syntax highlighting (safe: input is from JSON.stringify)
   function highlightJson(s: string): string {
     let formatted: string;
@@ -587,7 +612,7 @@ export default function ApiTester({ onCreateRule }: Props) {
 
         {tab.activeSubTab === 'body' && (
           <div className="p-2">
-            <div className="flex gap-1.5 mb-1.5">
+            <div className="flex gap-1.5 mb-1.5 items-center">
               {BODY_TYPES.map(bt => (
                 <button key={bt.value}
                   className={`px-2 py-0.5 text-xs rounded-full font-medium ${tab.bodyType === bt.value ? 'bg-primary-50 text-primary-600' : 'bg-gray-100 text-gray-500 hover:bg-gray-200'}`}
@@ -595,6 +620,20 @@ export default function ApiTester({ onCreateRule }: Props) {
                   {bt.label}
                 </button>
               ))}
+              {tab.bodyType === 'raw' && (
+                <div className="ml-auto flex items-center gap-1.5">
+                  <button onClick={formatBody}
+                    className="px-2 py-0.5 text-xs rounded-full font-medium bg-gray-100 text-gray-500 hover:bg-gray-200 dark:bg-slate-700 dark:text-slate-300"
+                    title="格式化 JSON（缩进 2 空格）；能自动修复常见错误：多余逗号、单引号、缺引号、注释、缺括号、中文标点等">
+                    格式化
+                  </button>
+                  <button onClick={minifyBody}
+                    className="px-2 py-0.5 text-xs rounded-full font-medium bg-gray-100 text-gray-500 hover:bg-gray-200 dark:bg-slate-700 dark:text-slate-300"
+                    title="压缩 JSON：去掉所有空白压成一行（先尝试修复再压缩）">
+                    压缩
+                  </button>
+                </div>
+              )}
             </div>
             <textarea
               placeholder="请求体..."

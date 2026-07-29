@@ -6,6 +6,7 @@ import {
 import { generateId, HTTP_METHODS, RESOURCE_TYPES, GROUP_COLORS } from '../../shared/constants';
 import { ArrowsPointingOutIcon } from '@heroicons/react/24/outline';
 import { showToast } from '../../shared/toast';
+import { repairAndFormatJson, minifyJson } from '../../shared/json-format';
 
 const isFullscreen = window.location.pathname.includes('popup-fullscreen');
 
@@ -85,6 +86,34 @@ export default function RuleEditor({ rule, groups, onSave, onCancel, prefill }: 
 
   const addAction = () => setActions([...actions, { ...DEFAULT_ACTION }]);
   const removeAction = (index: number) => setActions(actions.filter((_, i) => i !== index));
+
+  // 「设置请求体/响应体」的值：合法则美化；非法则尝试自动修复常见错误并填入，仍失败给带位置的提示
+  const formatActionValue = (index: number) => {
+    const cur = actions[index]?.value || '';
+    if (!cur.trim()) return;
+    const r = repairAndFormatJson(cur);
+    if (r.ok) {
+      updateAction(index, 'value', r.text);
+      clearError(`action_${index}_value`);
+      if (r.repaired) showToast('已自动修复并格式化，请核对内容', 'success', 4000);
+    } else {
+      showToast(r.error || '不是合法 JSON', 'warning', 6000);
+    }
+  };
+
+  // 「设置请求体/响应体」的值压缩成一行（同样先尝试修复）
+  const minifyActionValue = (index: number) => {
+    const cur = actions[index]?.value || '';
+    if (!cur.trim()) return;
+    const r = minifyJson(cur);
+    if (r.ok) {
+      updateAction(index, 'value', r.text);
+      clearError(`action_${index}_value`);
+      if (r.repaired) showToast('已自动修复并压缩，请核对内容', 'success', 4000);
+    } else {
+      showToast(r.error || '不是合法 JSON', 'warning', 6000);
+    }
+  };
 
   const clearError = (key: string) => { if (errors[key]) { const e = { ...errors }; delete e[key]; setErrors(e); } };
 
@@ -493,6 +522,26 @@ export default function RuleEditor({ rule, groups, onSave, onCancel, prefill }: 
                   )}
                   {showValueField(action.type) && (
                     <div>
+                      {(action.type === 'modifyResponseBody' || action.type === 'modifyRequestBody') && action.operate === 'set' && (
+                        <div className="flex justify-end gap-2 mb-1">
+                          <button
+                            type="button"
+                            onClick={() => formatActionValue(i)}
+                            className="text-xs text-primary-500 hover:text-primary-600 font-medium"
+                            title="格式化 JSON（缩进 2 空格）；能自动修复常见错误：多余逗号、单引号、缺引号、注释、缺括号、中文标点等"
+                          >
+                            格式化 JSON
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => minifyActionValue(i)}
+                            className="text-xs text-gray-400 hover:text-gray-600 dark:hover:text-slate-300 font-medium"
+                            title="压缩 JSON：去掉所有空白压成一行（先尝试修复再压缩）"
+                          >
+                            压缩
+                          </button>
+                        </div>
+                      )}
                       <textarea
                         placeholder={getValuePlaceholder(action)}
                         value={action.value}
