@@ -684,7 +684,7 @@ export default function ApiTester({ onCreateRule }: Props) {
                     </button>
                   </div>
                   <pre
-                    className="bg-gray-50 dark:bg-slate-900 rounded p-1.5 text-xs max-h-64 overflow-y-auto whitespace-pre-wrap break-all"
+                    className="bg-gray-50 dark:bg-slate-900 rounded p-1.5 text-xs whitespace-pre-wrap break-all"
                     style={{ fontSize: 10, fontFamily: "'SF Mono', 'Fira Code', Consolas, monospace" }}
                     dangerouslySetInnerHTML={{ __html: highlightJson(tab.response.body.length > 50000 ? tab.response.body.slice(0, 50000) + '\n\n... (已截断，共 ' + formatSize(tab.response.body.length) + ')' : tab.response.body) }}
                   />

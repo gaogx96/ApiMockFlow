@@ -27,6 +27,8 @@ Chrome 浏览器扩展 — API 请求拦截、Mock 数据注入、接口调试�
 **API 测试器**
 - 多 Tab 请求界面
 - cURL / HTTPie / OpenAPI 3.x 导入
+- 请求/响应体 JSON 格式化、自动修复与压缩
+- 响应体展示框随内容自适应高度
 - 响应 JSON 语法高亮
 - 请求历史与已保存请求
 
@@ -55,7 +57,7 @@ Chrome 浏览器扩展 — API 请求拦截、Mock 数据注入、接口调试�
 npm install          # 安装依赖
 npm run dev          # 开发模式
 npm run build        # 生产构建（esbuild 压缩，输出到 dist/）
-npm test             # 运行单测（vitest，34 个用例）
+npm test             # 运行单测（vitest，107 个用例）
 ```
 
 ---
@@ -91,7 +93,9 @@ src/
 │   └── constants.ts          # 常量
 ├── __tests__/
 │   ├── engine.ts             # 匹配引擎（可测试模块）
-│   └── engine.test.ts        # 34 个单测用例
+│   ├── engine.test.ts        # 引擎/规则匹配单测
+│   ├── json-format.test.ts   # JSON 格式化/修复/压缩单测
+│   └── jwt.test.ts           # JWT 解析单测
 └── styles/global.css         # 全局样式 + 暗色模式
 ```
 
