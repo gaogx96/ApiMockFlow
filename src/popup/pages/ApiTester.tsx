@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { ArrowUpTrayIcon, SignalIcon, ClockIcon, XMarkIcon, PlusIcon, BookmarkIcon, BookmarkSlashIcon, ShieldCheckIcon, ArrowPathIcon, FunnelIcon } from '@heroicons/react/24/outline';
-import { ApiRequest, ApiResponse, ApiHistoryItem, SavedRequest } from '../../shared/api-types';
+import { ArrowUpTrayIcon, SignalIcon, ClockIcon, XMarkIcon, PlusIcon, BookmarkIcon, BookmarkSlashIcon, ShieldCheckIcon, ArrowPathIcon, FunnelIcon, ClipboardDocumentIcon } from '@heroicons/react/24/outline';
+import { ApiRequest, ApiResponse, ApiHistoryItem, SavedRequest, RequestDiagnostic } from '../../shared/api-types';
 import { parseImport } from '../../shared/import-parser';
 import { generateId } from '../../shared/constants';
 import { showToast } from '../../shared/toast';
@@ -42,6 +42,20 @@ function createTab(name?: string): TabData {
 
 interface Props {
   onCreateRule?: (prefill: { url: string; method: string }) => void;
+}
+
+function Diagnostic({ diagnostic }: { diagnostic: RequestDiagnostic | null }) {
+  if (!diagnostic) return null;
+  const tone = diagnostic.level === 'error'
+    ? 'bg-red-50 border-red-200 text-red-700 dark:bg-red-950/30 dark:border-red-900 dark:text-red-300'
+    : 'bg-amber-50 border-amber-200 text-amber-700 dark:bg-amber-950/30 dark:border-amber-900 dark:text-amber-300';
+  return (
+    <div className={`p-2 border rounded-md text-xs mb-2 ${tone}`} style={{ fontSize: 11 }}>
+      <div className="font-medium">诊断：{diagnostic.title}</div>
+      <div className="mt-0.5 break-all">{diagnostic.message}</div>
+      {diagnostic.suggestion && <div className="mt-1 opacity-90">建议：{diagnostic.suggestion}</div>}
+    </div>
+  );
 }
 
 export default function ApiTester({ onCreateRule }: Props) {
@@ -219,21 +233,30 @@ export default function ApiTester({ onCreateRule }: Props) {
       if (lastErr) {
         // 白盒化：区分 context invalidated（需重载）和其他错误
         if (lastErr.message?.includes('Extension context invalidated')) {
-          updateTab('error', '扩展上下文已失效，请刷新插件 Popup 或重新加载扩展 (chrome://extensions → 刷新)');
+          const error = '扩展上下文已失效，请刷新插件 Popup 或重新加载扩展 (chrome://extensions → 刷新)';
+          updateTab('error', error);
+          saveToHistory(req, undefined, error);
         } else {
-          updateTab('error', '通信错误: ' + lastErr.message);
+          const error = '通信错误: ' + lastErr.message;
+          updateTab('error', error);
+          saveToHistory(req, undefined, error);
         }
         return;
       }
-      if (!resp) { updateTab('error', '请求失败：后台脚本未响应。请检查扩展是否正常运行，或尝试重新加载扩展。'); return; }
-      if (resp.error) { updateTab('error', resp.error); return; }
+      if (!resp) {
+        const error = '请求失败：后台脚本未响应。请检查扩展是否正常运行，或尝试重新加载扩展。';
+        updateTab('error', error);
+        saveToHistory(req, undefined, error);
+        return;
+      }
+      if (resp.error) { updateTab('error', resp.error); saveToHistory(req, undefined, resp.error); return; }
       updateTab('response', resp);
       saveToHistory(req, resp);
     });
   }
 
-  function saveToHistory(req: ApiRequest, resp: ApiResponse) {
-    const item: ApiHistoryItem = { id: generateId(), request: req, response: resp, timestamp: Date.now() };
+  function saveToHistory(req: ApiRequest, resp?: ApiResponse, error?: string) {
+    const item: ApiHistoryItem = { id: generateId(), request: req, response: resp, error, timestamp: Date.now() };
     chrome.runtime.sendMessage({ type: 'API_TEST_HISTORY_SAVE', payload: item }, loadHistory);
   }
 
@@ -377,15 +400,52 @@ export default function ApiTester({ onCreateRule }: Props) {
     return esc
       .replace(/"([^"\\]|\\.)*"/g, (m) => {
         // Check if it's a key (followed by :)
-        return `<span style="color:#9cdcfe">${m}</span>`;
+        return `<span class="json-string">${m}</span>`;
       })
-      .replace(/\b(true|false)\b/g, '<span style="color:#569cd6">$1</span>')
-      .replace(/\b(null)\b/g, '<span style="color:#569cd6">$1</span>')
-      .replace(/\b(-?\d+\.?\d*([eE][+-]?\d+)?)\b/g, '<span style="color:#b5cea8">$1</span>');
+      .replace(/\b(true|false)\b/g, '<span class="json-boolean">$1</span>')
+      .replace(/\b(null)\b/g, '<span class="json-boolean">$1</span>')
+      .replace(/\b(-?\d+\.?\d*([eE][+-]?\d+)?)\b/g, '<span class="json-number">$1</span>');
   }
 
   function copyToClipboard(text: string) {
-    navigator.clipboard.writeText(text).catch(() => {});
+    navigator.clipboard.writeText(text).then(() => showToast('已复制到剪贴板', 'success')).catch(() => showToast('复制失败，请检查剪贴板权限', 'error'));
+  }
+
+  function shellQuote(value: string): string {
+    return `'${value.replace(/'/g, `'"'"'`)}'`;
+  }
+
+  function requestToCurl(req: ApiRequest, includeSensitive = false): string {
+    const lines = [`curl ${shellQuote(req.url)}`, `  -X ${req.method}`];
+    for (const [key, value] of Object.entries(req.headers)) {
+      if (!key.trim()) continue;
+      const safeValue = !includeSensitive && /^(authorization|cookie|x-api-key)$/i.test(key) ? '***' : value;
+      lines.push(`  -H ${shellQuote(`${key}: ${safeValue}`)}`);
+    }
+    if (req.body && !/^(GET|HEAD)$/i.test(req.method)) lines.push(`  --data-raw ${shellQuote(req.body)}`);
+    return lines.join(' \\\n');
+  }
+
+  function getDiagnostic(response?: ApiResponse, error?: string): RequestDiagnostic | null {
+    if (error) {
+      if (/SSRF|内网|私有地址/i.test(error)) return { level: 'error', title: '安全策略已拦截请求', message: error, suggestion: '如确需访问内网地址，请在 API 测试器中明确开启内网访问。' };
+      if (/timeout|超时/i.test(error)) return { level: 'error', title: '请求超时', message: error, suggestion: '检查服务可用性、网络状况或接口响应耗时。' };
+      if (/cors/i.test(error)) return { level: 'error', title: '跨域请求受限', message: error, suggestion: '确认目标服务的 CORS 配置，或改用允许的测试环境。' };
+      return { level: 'error', title: '请求未完成', message: error, suggestion: '检查 URL、网络连接与扩展运行状态。' };
+    }
+    if (!response) return null;
+    const status = response.status;
+    if (status === 401) return { level: 'error', title: '未认证或登录态已失效', message: '服务返回 401 Unauthorized。', suggestion: '尝试同步当前页面登录态，或检查 Authorization 请求头。' };
+    if (status === 403) return { level: 'error', title: '请求无权限', message: '服务返回 403 Forbidden。', suggestion: '确认账号权限、Token 作用域或接口访问策略。' };
+    if (status === 404) return { level: 'error', title: '接口不存在', message: '服务返回 404 Not Found。', suggestion: '检查 URL、方法与环境域名是否正确。' };
+    if (status === 408 || status === 504) return { level: 'error', title: '服务响应超时', message: `服务返回 ${status}。`, suggestion: '检查上游服务、网关配置或稍后重试。' };
+    if (status === 429) return { level: 'warning', title: '请求频率受限', message: '服务返回 429 Too Many Requests。', suggestion: '降低请求频率，或等待限流窗口恢复。' };
+    if (status >= 500) return { level: 'error', title: '服务端错误', message: `服务返回 ${status} ${response.statusText}。`, suggestion: '检查服务端日志或稍后重试。' };
+    const contentType = Object.entries(response.headers).find(([key]) => key.toLowerCase() === 'content-type')?.[1] || '';
+    if (/json/i.test(contentType) && response.body.trim()) {
+      try { JSON.parse(response.body); } catch { return { level: 'warning', title: '响应 JSON 格式异常', message: 'Content-Type 声明为 JSON，但响应体无法解析。', suggestion: '检查服务端序列化结果或查看原始响应体。' }; }
+    }
+    return null;
   }
 
   function formatSize(bytes: number): string {
@@ -648,6 +708,12 @@ export default function ApiTester({ onCreateRule }: Props) {
         {tab.activeSubTab === 'response' && (
           <div className="p-2">
             {tab.error && (
+              <Diagnostic diagnostic={getDiagnostic(undefined, tab.error)} />
+            )}
+            {tab.response && getDiagnostic(tab.response) && (
+              <Diagnostic diagnostic={getDiagnostic(tab.response)} />
+            )}
+            {tab.error && !getDiagnostic(undefined, tab.error) && (
               <div className="p-2 bg-red-50 border border-red-200 rounded-md text-xs text-red-600 mb-2 break-all" style={{ fontSize: 11 }}>
                 {tab.error}
               </div>
@@ -684,7 +750,7 @@ export default function ApiTester({ onCreateRule }: Props) {
                     </button>
                   </div>
                   <pre
-                    className="bg-gray-50 dark:bg-slate-900 rounded p-1.5 text-xs whitespace-pre-wrap break-all"
+                    className="bg-gray-50 dark:bg-slate-900 text-gray-800 dark:text-slate-200 border border-gray-200 dark:border-slate-700 rounded p-1.5 text-xs whitespace-pre-wrap break-all"
                     style={{ fontSize: 10, fontFamily: "'SF Mono', 'Fira Code', Consolas, monospace" }}
                     dangerouslySetInnerHTML={{ __html: highlightJson(tab.response.body.length > 50000 ? tab.response.body.slice(0, 50000) + '\n\n... (已截断，共 ' + formatSize(tab.response.body.length) + ')' : tab.response.body) }}
                   />
@@ -714,7 +780,7 @@ export default function ApiTester({ onCreateRule }: Props) {
             ) : (
               history.map((item) => (
                 <div key={item.id}
-                  className="px-2 py-1.5 cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-800 dark:bg-slate-900 transition-colors"
+                  className="px-2 py-1.5 cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-800 dark:bg-slate-900 transition-colors group"
                   onClick={() => loadRequestToTab(item.request)}>
                   <div className="flex items-center gap-1.5">
                     <span className={`method-badge method-${item.request.method}`} style={{ fontSize: 9 }}>{item.request.method}</span>
@@ -724,7 +790,26 @@ export default function ApiTester({ onCreateRule }: Props) {
                         {item.response.status}
                       </span>
                     )}
+                    <button
+                      onClick={(e) => { e.stopPropagation(); copyToClipboard(requestToCurl(item.request)); }}
+                      className="opacity-0 group-hover:opacity-100 text-gray-500 dark:text-slate-400 hover:text-primary-500 shrink-0"
+                      title="复制 cURL（敏感请求头将脱敏）"
+                    >
+                      <ClipboardDocumentIcon className="w-3.5 h-3.5" />
+                    </button>
+                    <button
+                      onClick={(e) => { e.stopPropagation(); copyToClipboard(requestToCurl(item.request, true)); }}
+                      className="w-3.5 h-3.5 opacity-0 group-hover:opacity-100 inline-flex items-center justify-center text-gray-500 dark:text-slate-400 hover:text-amber-500 shrink-0 leading-none"
+                      title="复制完整 cURL（包含敏感请求头）"
+                    >
+                      <span className="text-[9px] font-bold leading-none">全</span>
+                    </button>
                   </div>
+                  {getDiagnostic(item.response, item.error) && (
+                    <div className={`mt-1 text-xs truncate ${getDiagnostic(item.response, item.error)!.level === 'error' ? 'text-red-500' : 'text-amber-600'}`} style={{ fontSize: 10 }}>
+                      {getDiagnostic(item.response, item.error)!.title}
+                    </div>
+                  )}
                 </div>
               ))
             )}
@@ -759,14 +844,28 @@ export default function ApiTester({ onCreateRule }: Props) {
                   {onCreateRule && (
                     <button
                       onClick={(e) => { e.stopPropagation(); onCreateRule({ url: item.request.url, method: item.request.method }); }}
-                      className="opacity-0 group-hover:opacity-100 text-gray-300 hover:text-primary-500 ml-1"
+                      className="opacity-0 group-hover:opacity-100 text-gray-500 dark:text-slate-400 hover:text-primary-500 ml-1"
                       title="创建规则">
                       <ShieldCheckIcon className="w-3.5 h-3.5" />
                     </button>
                   )}
                   <button
+                    onClick={(e) => { e.stopPropagation(); copyToClipboard(requestToCurl(item.request)); }}
+                    className="opacity-0 group-hover:opacity-100 text-gray-500 dark:text-slate-400 hover:text-primary-500 ml-1"
+                    title="复制 cURL（敏感请求头将脱敏）"
+                  >
+                    <ClipboardDocumentIcon className="w-3.5 h-3.5" />
+                  </button>
+                  <button
+                    onClick={(e) => { e.stopPropagation(); copyToClipboard(requestToCurl(item.request, true)); }}
+                    className="w-3.5 h-3.5 opacity-0 group-hover:opacity-100 inline-flex items-center justify-center text-gray-500 dark:text-slate-400 hover:text-amber-500 ml-1 leading-none"
+                    title="复制完整 cURL（包含敏感请求头）"
+                  >
+                    <span className="text-[9px] font-bold leading-none">全</span>
+                  </button>
+                  <button
                     onClick={(e) => deleteSaved(item.id, e)}
-                    className="opacity-0 group-hover:opacity-100 text-gray-300 hover:text-red-500 ml-1"
+                    className="opacity-0 group-hover:opacity-100 text-gray-500 dark:text-slate-400 hover:text-red-500 ml-1"
                     title="删除">
                     <XMarkIcon className="w-3.5 h-3.5" />
                   </button>

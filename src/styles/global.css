@@ -231,6 +231,14 @@ html.dark select.form-select {
 }
 html.dark .form-label { color: #cbd5e1; }
 
+/* API Tester response JSON: high contrast in light mode, softer editor colors in dark mode. */
+.json-string { color: #2563a6; }
+.json-boolean { color: #1d4ed8; }
+.json-number { color: #166534; }
+html.dark .json-string { color: #9cdcfe; }
+html.dark .json-boolean { color: #569cd6; }
+html.dark .json-number { color: #b5cea8; }
+
 /* ========== Tags / Badges ========== */
 .tag {
   display: inline-flex;

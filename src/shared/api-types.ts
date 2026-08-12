@@ -19,6 +19,7 @@ export interface ApiHistoryItem {
   id: string;
   request: ApiRequest;
   response?: ApiResponse;
+  error?: string;
   timestamp: number;
 }
 
@@ -29,4 +30,11 @@ export interface SavedRequest {
   timestamp: number;
   /** 发送时是否用浏览器当前有效 Cookie 覆盖已保存的 Cookie 头 */
   autoRefreshCookie?: boolean;
+}
+
+export interface RequestDiagnostic {
+  level: 'warning' | 'error';
+  title: string;
+  message: string;
+  suggestion?: string;
 }

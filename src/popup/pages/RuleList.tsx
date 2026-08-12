@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useCallback, useRef, useEffect } from 'react';
-import { MagnifyingGlassIcon, PlusIcon, ArrowDownTrayIcon, ArrowUpTrayIcon, TrashIcon, ClipboardDocumentListIcon, ChevronUpIcon, ChevronDownIcon } from '@heroicons/react/24/outline';
+import { MagnifyingGlassIcon, PlusIcon, ArrowDownTrayIcon, ArrowUpTrayIcon, TrashIcon, ClipboardDocumentListIcon, ChevronUpIcon, ChevronDownIcon, DocumentDuplicateIcon } from '@heroicons/react/24/outline';
 import { AppState, Rule, RuleGroup, MATCH_TYPE_LABELS, ACTION_TYPE_LABELS } from '../../shared/types';
 import { showToast, showConfirm } from '../../shared/toast';
 
@@ -54,6 +54,47 @@ export default function RuleList({ state, onRefresh, onEditRule }: Props) {
     e.stopPropagation();
     if (!await showConfirm('确定删除此规则？')) return;
     await chrome.runtime.sendMessage({ type: 'DELETE_RULE', payload: { id: ruleId } });
+    onRefresh();
+  };
+
+  const duplicateRule = async (rule: Rule, e: React.MouseEvent) => {
+    e.stopPropagation();
+    const now = Date.now();
+    const copy: Rule = {
+      ...rule,
+      id: crypto.randomUUID?.() || `${now}-${Math.random().toString(36).slice(2)}`,
+      name: `${rule.name || '未命名规则'} - 副本`,
+      enabled: false,
+      createdAt: now,
+      updatedAt: now,
+      match: { ...rule.match },
+      actions: rule.actions.map(action => ({ ...action })),
+    };
+    const rules = [...state.rules];
+    const index = rules.findIndex(item => item.id === rule.id);
+    rules.splice(index >= 0 ? index + 1 : rules.length, 0, copy);
+    await chrome.runtime.sendMessage({ type: 'SAVE_RULES', payload: rules });
+    showToast('规则已复制为禁用副本', 'success');
+    onRefresh();
+  };
+
+  const deleteGroup = async (group: RuleGroup, e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (group.id === 'default') {
+      showToast('默认分组不能删除', 'warning');
+      return;
+    }
+    const affected = state.rules.filter(rule => rule.groupId === group.id).length;
+    const suffix = affected ? `，${affected} 条规则将移入默认分组` : '';
+    if (!await showConfirm(`确定删除分组「${group.name}」吗？${suffix}`)) return;
+    const groups = state.groups.filter(item => item.id !== group.id);
+    const rules = affected
+      ? state.rules.map(rule => rule.groupId === group.id ? { ...rule, groupId: 'default', updatedAt: Date.now() } : rule)
+      : state.rules;
+    if (affected) await chrome.runtime.sendMessage({ type: 'SAVE_RULES', payload: rules });
+    await chrome.runtime.sendMessage({ type: 'SAVE_GROUPS', payload: groups });
+    if (filterGroup === group.id) setFilterGroup('');
+    showToast(affected ? '分组已删除，规则已移入默认分组' : '分组已删除', 'success');
     onRefresh();
   };
 
@@ -154,17 +195,27 @@ export default function RuleList({ state, onRefresh, onEditRule }: Props) {
               全部
             </button>
             {state.groups.map((g) => (
-              <button
-                key={g.id}
-                className={`px-2.5 py-1 text-xs rounded-full font-medium transition-colors ${
-                  filterGroup === g.id ? 'bg-primary-500 text-white' : 'bg-gray-100 text-gray-500 hover:bg-gray-200 dark:bg-slate-800 dark:text-slate-400 dark:hover:bg-slate-700'
-                }`}
-                onClick={() => setFilterGroup(g.id)}
-              >
-                <span className="inline-block w-1.5 h-1.5 rounded-full mr-1.5 align-middle"
-                  style={{ backgroundColor: g.color }} />
-                {g.name}
-              </button>
+              <div key={g.id} className="inline-flex items-center rounded-full bg-gray-100 dark:bg-slate-800">
+                <button
+                  className={`px-2.5 py-1 text-xs rounded-full font-medium transition-colors ${
+                    filterGroup === g.id ? 'bg-primary-500 text-white' : 'text-gray-500 hover:bg-gray-200 dark:text-slate-400 dark:hover:bg-slate-700'
+                  }`}
+                  onClick={() => setFilterGroup(g.id)}
+                >
+                  <span className="inline-block w-1.5 h-1.5 rounded-full mr-1.5 align-middle"
+                    style={{ backgroundColor: g.color }} />
+                  {g.name}
+                </button>
+                {g.id !== 'default' && (
+                  <button
+                    className="mr-1 text-gray-400 hover:text-red-500 dark:text-slate-500 dark:hover:text-red-400"
+                    onClick={(e) => deleteGroup(g, e)}
+                    title={`删除分组「${g.name}」`}
+                  >
+                    <TrashIcon className="w-3 h-3" />
+                  </button>
+                )}
+              </div>
             ))}
           </div>
         )}
@@ -252,6 +303,9 @@ export default function RuleList({ state, onRefresh, onEditRule }: Props) {
                         title={isFiltered ? '排序前请先清除搜索/分组筛选' : '下移'}
                       >
                         <ChevronDownIcon className="w-3.5 h-3.5" />
+                      </button>
+                      <button className="btn-ghost p-1 text-xs" onClick={(e) => duplicateRule(rule, e)} title="复制规则（副本默认禁用）">
+                        <DocumentDuplicateIcon className="w-3.5 h-3.5" />
                       </button>
                       <button className="btn-ghost p-1 text-xs" onClick={(e) => deleteRule(rule.id, e)} title="删除">
                         <TrashIcon className="w-4 h-4" />
