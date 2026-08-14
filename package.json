@@ -1,6 +1,6 @@
 {
   "name": "apimockflow",
-  "version": "1.5.0",
+  "version": "1.5.1",
   "description": "ApiMockFlow - API 拦截、Mock 与测试浏览器插件",
   "type": "module",
   "scripts": {

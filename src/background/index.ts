@@ -60,6 +60,12 @@ const authCache = new Map<string, Record<string, string>>(); // origin -> { head
 const AUTH_SESSION_KEY = 'authHeadersByOrigin';
 const MAX_AUTH_ORIGINS = 30; // LRU 上限，控制内存/session 体积与隐私足迹
 
+// origin -> { headerName: cookieName }：抓包时若某认证头的值恰好等于某个 cookie 的值，
+// 记录这条「镜像」关系。用于同步登录态时用实时 cookie 值校正过期认证头
+// （如 shiro：Authorization 头与 shiroCookie 必须是同一 token，重新登录后 token 轮换需保持一致）。
+const authCookieLink = new Map<string, Record<string, string>>();
+const AUTH_LINK_SESSION_KEY = 'authCookieLinkByOrigin';
+
 function isAuthHeader(name: string): boolean {
   const n = name.toLowerCase();
   if (n === 'cookie') return false; // cookie 单独处理
@@ -71,19 +77,28 @@ function persistAuthCache() {
   // 此时若全量覆盖 session 会丢失之前已保存的其它 origin（竞态）。
   if (!authCacheRestored) return;
   try {
-    chrome.storage.session.set({ [AUTH_SESSION_KEY]: Object.fromEntries(authCache) });
+    chrome.storage.session.set({
+      [AUTH_SESSION_KEY]: Object.fromEntries(authCache),
+      [AUTH_LINK_SESSION_KEY]: Object.fromEntries(authCookieLink),
+    });
   } catch (_) { /* storage.session may be unavailable */ }
 }
 
 // SW 启动时从 session 恢复缓存（service worker 被回收后重建）
 let authCacheRestored = false;
 try {
-  chrome.storage.session.get(AUTH_SESSION_KEY, (res) => {
+  chrome.storage.session.get([AUTH_SESSION_KEY, AUTH_LINK_SESSION_KEY], (res) => {
     const saved = res?.[AUTH_SESSION_KEY];
     if (saved && typeof saved === 'object') {
       // 不覆盖恢复前已抓到的更新（更新的值更可信）
       for (const [origin, headers] of Object.entries(saved)) {
         if (!authCache.has(origin)) authCache.set(origin, headers as Record<string, string>);
+      }
+    }
+    const savedLinks = res?.[AUTH_LINK_SESSION_KEY];
+    if (savedLinks && typeof savedLinks === 'object') {
+      for (const [origin, links] of Object.entries(savedLinks)) {
+        if (!authCookieLink.has(origin)) authCookieLink.set(origin, links as Record<string, string>);
       }
     }
     authCacheRestored = true;
@@ -134,21 +149,45 @@ const authHeaderListener = (details: chrome.webRequest.OnBeforeSendHeadersDetail
   try { origin = new URL(details.url).origin; } catch { return; }
 
   const found: Record<string, string> = {};
+  let cookieHeader = '';
   for (const h of headers) {
-    if (h.value && isAuthHeader(h.name)) found[h.name] = h.value;
+    if (!h.value) continue;
+    if (h.name.toLowerCase() === 'cookie') { cookieHeader = h.value; continue; }
+    if (isAuthHeader(h.name)) found[h.name] = h.value;
   }
   if (Object.keys(found).length === 0) return;
 
+  // 检测「认证头 ↔ cookie」镜像：某认证头的值恰好等于某个 cookie 的值时，记下该 cookie 名。
+  // 同步登录态时据此用实时 cookie 值校正过期 token（如 shiro：Authorization === shiroCookie）。
+  const foundLinks: Record<string, string> = {};
+  if (cookieHeader) {
+    const cookiePairs: Record<string, string> = {};
+    for (const seg of cookieHeader.split(';')) {
+      const i = seg.indexOf('=');
+      if (i > 0) cookiePairs[seg.slice(0, i).trim()] = seg.slice(i + 1).trim();
+    }
+    for (const [hn, hv] of Object.entries(found)) {
+      for (const [cn, cv] of Object.entries(cookiePairs)) {
+        if (cv && cv === hv) { foundLinks[hn] = cn; break; }
+      }
+    }
+  }
+
   const prev = authCache.get(origin) || {};
   const merged = { ...prev, ...found };
+  const prevLinks = authCookieLink.get(origin) || {};
+  const mergedLinks = { ...prevLinks, ...foundLinks };
   // 仅在发生变化时写 session，避免每个请求都写入
-  if (JSON.stringify(prev) !== JSON.stringify(merged)) {
+  if (JSON.stringify(prev) !== JSON.stringify(merged)
+    || JSON.stringify(prevLinks) !== JSON.stringify(mergedLinks)) {
     authCache.delete(origin);          // 重新插入到末尾（LRU：最近使用）
     authCache.set(origin, merged);
+    if (Object.keys(mergedLinks).length > 0) authCookieLink.set(origin, mergedLinks);
     while (authCache.size > MAX_AUTH_ORIGINS) {
       const oldest = authCache.keys().next().value as string | undefined;
       if (oldest === undefined) break;
       authCache.delete(oldest);
+      authCookieLink.delete(oldest);
     }
     persistAuthCache();
   }
@@ -191,6 +230,41 @@ function getAuthHeaders(url: string): Promise<Record<string, string>> {
       });
     } catch { r({}); }
   });
+}
+
+// 读取某 origin 的「认证头 ↔ cookie」镜像关系（优先内存，miss 时查 session）
+function getAuthLinks(url: string): Promise<Record<string, string>> {
+  let origin: string;
+  try { origin = new URL(url).origin; } catch { return Promise.resolve({}); }
+  if (authCookieLink.has(origin)) return Promise.resolve(authCookieLink.get(origin)!);
+  return new Promise((r) => {
+    try {
+      chrome.storage.session.get(AUTH_LINK_SESSION_KEY, (res) => {
+        const all = res?.[AUTH_LINK_SESSION_KEY] || {};
+        r(all[origin] || {});
+      });
+    } catch { r({}); }
+  });
+}
+
+// 用实时 cookie 校正抓取到的认证头：若某认证头的值在抓包时镜像自某 cookie，
+// 而该 cookie 当前值已变化（重新登录后 token 轮换），则改用最新 cookie 值，
+// 避免认证头与 Cookie 不一致（如 Authorization != shiroCookie）导致同步后仍 401。
+function reconcileAuthWithCookies(
+  auth: Record<string, string>,
+  links: Record<string, string>,
+  liveCookies: chrome.cookies.Cookie[],
+): Record<string, string> {
+  if (!links || Object.keys(links).length === 0) return auth;
+  const live = new Map(liveCookies.map((c) => [c.name, c.value]));
+  const out: Record<string, string> = { ...auth };
+  for (const [headerName, cookieName] of Object.entries(links)) {
+    const liveVal = live.get(cookieName);
+    if (liveVal && out[headerName] !== undefined && out[headerName] !== liveVal) {
+      out[headerName] = liveVal;
+    }
+  }
+  return out;
 }
 
 // 常见「二级公共后缀」关键词：当倒数第二段是这些、且顶级域是 2 字母国家码时，
@@ -490,11 +564,12 @@ chrome.runtime.onMessage.addListener((msg: any, _sender: any, sendResponse: any)
       // - refreshCookie=true: always override the Cookie header with current browser cookies
       //   (fixes stale hardcoded login state in saved requests).
       // - otherwise: only attach when the user hasn't set a Cookie header.
+      let liveCookies: chrome.cookies.Cookie[] = [];
       if (refreshCookie || !hdrs.has('Cookie')) {
         try {
-          const cookies = await getCookiesForUrl(url);
-          if (cookies && cookies.length > 0) {
-            const cookieStr = cookies.map(c => `${c.name}=${c.value}`).join('; ');
+          liveCookies = await getCookiesForUrl(url);
+          if (liveCookies.length > 0) {
+            const cookieStr = liveCookies.map(c => `${c.name}=${c.value}`).join('; ');
             hdrs.set('Cookie', cookieStr);
           }
         } catch (_) { /* cookies permission may be missing */ }
@@ -502,10 +577,13 @@ chrome.runtime.onMessage.addListener((msg: any, _sender: any, sendResponse: any)
 
       // refreshCookie 语义为「同步登录态」：一并用捕获到的最新认证头覆盖同名头，
       // 解决 Authorization / token 过期导致的登录态丢失。
+      // 若认证头镜像自某 cookie（如 shiro token），用实时 cookie 值校正，避免过期 token 与 Cookie 不一致导致 401。
       if (refreshCookie) {
         try {
           const auth = await getAuthHeaders(url);
-          for (const [k, v] of Object.entries(auth)) if (v) hdrs.set(k, v);
+          const links = await getAuthLinks(url);
+          const reconciled = reconcileAuthWithCookies(auth, links, liveCookies);
+          for (const [k, v] of Object.entries(reconciled)) if (v) hdrs.set(k, v);
         } catch (_) { /* ignore */ }
       }
 
@@ -572,14 +650,15 @@ chrome.runtime.onMessage.addListener((msg: any, _sender: any, sendResponse: any)
       return true;
     }
     (async () => {
-      let cookieStr = '';
-      let cookieCount = 0;
+      let list: chrome.cookies.Cookie[] = [];
       try {
-        const list = await getCookiesForUrl(url);
-        cookieStr = list.map(c => `${c.name}=${c.value}`).join('; ');
-        cookieCount = list.length;
+        list = await getCookiesForUrl(url);
       } catch (_) { /* cookies permission may be missing */ }
-      const authHeaders = await getAuthHeaders(url);
+      const cookieStr = list.map(c => `${c.name}=${c.value}`).join('; ');
+      const cookieCount = list.length;
+      const auth = await getAuthHeaders(url);
+      const links = await getAuthLinks(url);
+      const authHeaders = reconcileAuthWithCookies(auth, links, list);
       sendResponse({ cookieStr, cookieCount, authHeaders });
     })();
     return true;
