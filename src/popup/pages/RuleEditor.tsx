@@ -561,7 +561,9 @@ export default function RuleEditor({ rule, groups, onSave, onCancel, prefill }: 
                     <div className="text-xs text-amber-600 dark:text-amber-400 space-y-1">
                       <p>警告：注入的脚本在页面上下文中执行，可访问页面所有数据。仅使用你信任的脚本。</p>
                       <p>注意：避免死循环（while true）和超大计算量，否则页面将卡死需手动刷新。脚本执行超 2 秒可能阻塞页面。</p>
-                      <p className="font-mono text-gray-500">ctx = {`{ url, headers, body }`} — 修改 ctx.url / ctx.body 即可影响请求</p>
+                      <p className="font-mono text-gray-500">ctx = {`{ url, headers, body, crypto }`} — 改 ctx.url / ctx.body / ctx.headers 即可影响请求</p>
+                      <p className="font-mono text-gray-500">ctx.crypto: md5 / sha1 / sha256 / hmacSha1(key,msg) / hmacSha256(key,msg) / base64Encode / base64Decode</p>
+                      <p>提示：本动作恒在请求体/头改写之后执行。若接口对请求体签名，可在此用改写后的 ctx.body 重算签名头，例如 <span className="font-mono">{`ctx.headers['x-sign'] = ctx.crypto.md5(ctx.body)`}</span>。</p>
                     </div>
                   )}
                 </div>

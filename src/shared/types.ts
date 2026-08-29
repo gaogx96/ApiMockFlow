@@ -78,6 +78,8 @@ export interface InterceptedRequest {
   cancelled: boolean;
   delayed: boolean;
   delayMs: number;
+  /** 诊断提示（如：请求体被改写但带签名头，服务端校验可能失败） */
+  warnings?: string[];
 }
 
 // ==================== 消息通信 ====================

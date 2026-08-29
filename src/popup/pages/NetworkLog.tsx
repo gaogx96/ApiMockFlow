@@ -229,6 +229,9 @@ export default function NetworkLog({ onCreateRule }: Props) {
                     {log.cancelled && <span className="tag tag-red">已拦截</span>}
                     {log.delayed && <span className="tag tag-amber">延迟{log.delayMs}ms</span>}
                     {hasDiff(log) && !log.cancelled && <span className="tag tag-green">已修改</span>}
+                    {log.warnings && log.warnings.length > 0 && (
+                      <span className="tag tag-amber" title={log.warnings.join('\n')}>⚠ 签名风险</span>
+                    )}
 
                     {/* Rule names */}
                     <span className="text-xs text-gray-400 truncate shrink-0" style={{ maxWidth: 100 }} title={log.ruleNames.join(', ')}>
@@ -257,6 +260,18 @@ export default function NetworkLog({ onCreateRule }: Props) {
                           <span key={i} className="tag tag-blue">{name}</span>
                         ))}
                       </div>
+
+                      {/* Sign / diagnostic warnings */}
+                      {log.warnings && log.warnings.length > 0 && (
+                        <div className="text-xs text-amber-700 dark:text-amber-300 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800/50 p-2 rounded space-y-1">
+                          {log.warnings.map((w, i) => (
+                            <div key={i} className="flex gap-1.5">
+                              <span className="shrink-0">⚠</span>
+                              <span className="leading-relaxed">{w}</span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
 
                       {/* Request diff */}
                       {renderDiff(

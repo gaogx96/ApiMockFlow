@@ -21,6 +21,15 @@ if (window.__APII_INIT) { /* already injected */ } else { window.__APII_INIT = t
 
   function safeRe(p, f) { try { return new RegExp(p, f); } catch (_) { return null; } }
   function hdrRec(h) { var r = {}; h.forEach(function (v, k) { r[k] = v; }); return r; }
+  // 请求头是否发生增/删/改（大小写不敏感比较名字，值精确比较）。
+  // 用于 XHR：无变化时绝不重设头（避免同名头被追加合并破坏 Authorization）。
+  function hdrsChanged(a, b) {
+    function lc(o) { var r = {}; for (var k in o) r[k.toLowerCase()] = String(o[k]); return r; }
+    var la = lc(a), lb = lc(b), kb = Object.keys(lb);
+    if (Object.keys(la).length !== kb.length) return true;
+    for (var i = 0; i < kb.length; i++) { if (!(kb[i] in la) || la[kb[i]] !== lb[kb[i]]) return true; }
+    return false;
+  }
   function parseHdr(raw) { var r = {}; raw.trim().split(/[\r\n]+/).forEach(function (line) { var idx = line.indexOf(': '); if (idx > 0) r[line.slice(0, idx)] = line.slice(idx + 2); }); return r; }
   var REQ = ['modifyRequestUrl','modifyRequestHeader','modifyRequestBody','redirect','cancel','delay','injectScript'];
   var RESP = ['modifyResponseHeader','modifyResponseBody','modifyStatusCode'];
@@ -39,6 +48,161 @@ if (window.__APII_INIT) { /* already injected */ } else { window.__APII_INIT = t
   function logId() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 6); }
   // 这些状态码按规范不能带响应体；构造 Response 时必须传 null，否则抛错
   function isNullBodyStatus(s) { return s === 101 || s === 204 || s === 205 || s === 304; }
+
+  // === 签名头检测 ===
+  // 请求体被改写、但请求头里带有对 body 计算的签名/摘要时，服务端校验会失败（多表现为 401→跳登录）。
+  // 命中这些字段即提示用户：需在 injectScript 里用改写后的 body 重算签名。
+  // 注意：不按名匹配 authorization——Bearer/JWT/Basic 是与 body 无关的静态凭证，
+  // 只有值形如「对请求体/参数做签名」的方案（如 AWS SigV4）才单独按值判定，避免在每个登录态请求上误报。
+  var SIGN_HDR_RE = /(^|[-_])(signature|sign|sig|hmac|digest|checksum)($|[-_])|^content-md5$|^(x-ca-|x-tt-|x-bogus|x-gorgon|x-sap-)/i;
+  var AUTH_SIGN_VAL_RE = /^\s*AWS4-HMAC|^\s*HMAC[- ]|\bSignature=|\bSignedHeaders=|\balgorithm\s*=/i;
+  function detectSignHeaders(h) {
+    var hit = [];
+    for (var k in h) {
+      if (k.toLowerCase() === 'authorization') {
+        // 仅当 Authorization 的值是「基于请求体/参数的签名」时才算，普通 Bearer/Basic/Digest 不报
+        if (AUTH_SIGN_VAL_RE.test(String(h[k] || ''))) hit.push(k);
+      } else if (SIGN_HDR_RE.test(k)) {
+        hit.push(k);
+      }
+    }
+    return hit;
+  }
+
+  // === 同步 crypto 辅助（暴露给 injectScript 的 ctx.crypto）===
+  // 纯 JS 实现，因 injectScript 在同步流程里执行，无法用异步的 SubtleCrypto。
+  // 提供 md5 / sha1 / sha256 / hmacSha1 / hmacSha256 / base64，入参出参均为字符串（hex/base64）。
+  var API_CRYPTO = (function () {
+    function utf8Bytes(str) {
+      if (typeof str !== 'string') str = String(str);
+      var out = [], i, c;
+      for (i = 0; i < str.length; i++) {
+        c = str.charCodeAt(i);
+        if (c < 0x80) out.push(c);
+        else if (c < 0x800) { out.push(0xc0 | (c >> 6), 0x80 | (c & 0x3f)); }
+        else if (c >= 0xd800 && c <= 0xdbff && i + 1 < str.length) {
+          var c2 = str.charCodeAt(++i);
+          var cp = 0x10000 + ((c & 0x3ff) << 10) + (c2 & 0x3ff);
+          out.push(0xf0 | (cp >> 18), 0x80 | ((cp >> 12) & 0x3f), 0x80 | ((cp >> 6) & 0x3f), 0x80 | (cp & 0x3f));
+        } else { out.push(0xe0 | (c >> 12), 0x80 | ((c >> 6) & 0x3f), 0x80 | (c & 0x3f)); }
+      }
+      return out;
+    }
+    function bytesToHex(b) { var h = ''; for (var i = 0; i < b.length; i++) { var s = (b[i] & 0xff).toString(16); h += s.length === 1 ? '0' + s : s; } return h; }
+
+    // ---- SHA-256 (bytes -> 32 bytes) ----
+    var K256 = [0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2];
+    function sha256Bytes(bytes) {
+      var H = [0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19];
+      var m = bytes.slice(), l = bytes.length;
+      m.push(0x80); while (m.length % 64 !== 56) m.push(0);
+      var hi = Math.floor(l / 0x20000000), lo = (l * 8) >>> 0;
+      m.push((hi>>>24)&0xff,(hi>>>16)&0xff,(hi>>>8)&0xff,hi&0xff,(lo>>>24)&0xff,(lo>>>16)&0xff,(lo>>>8)&0xff,lo&0xff);
+      function rr(x,n){return (x>>>n)|(x<<(32-n));}
+      var w = new Array(64);
+      for (var off = 0; off < m.length; off += 64) {
+        for (var i = 0; i < 16; i++) w[i] = (m[off+i*4]<<24)|(m[off+i*4+1]<<16)|(m[off+i*4+2]<<8)|(m[off+i*4+3]);
+        for (i = 16; i < 64; i++) {
+          var s0 = rr(w[i-15],7)^rr(w[i-15],18)^(w[i-15]>>>3);
+          var s1 = rr(w[i-2],17)^rr(w[i-2],19)^(w[i-2]>>>10);
+          w[i] = (w[i-16]+s0+w[i-7]+s1)|0;
+        }
+        var a=H[0],b=H[1],c=H[2],d=H[3],e=H[4],f=H[5],g=H[6],h=H[7];
+        for (i = 0; i < 64; i++) {
+          var S1 = rr(e,6)^rr(e,11)^rr(e,25), ch = (e&f)^(~e&g);
+          var t1 = (h+S1+ch+K256[i]+w[i])|0;
+          var S0 = rr(a,2)^rr(a,13)^rr(a,22), mj = (a&b)^(a&c)^(b&c);
+          var t2 = (S0+mj)|0;
+          h=g;g=f;f=e;e=(d+t1)|0;d=c;c=b;b=a;a=(t1+t2)|0;
+        }
+        H[0]=(H[0]+a)|0;H[1]=(H[1]+b)|0;H[2]=(H[2]+c)|0;H[3]=(H[3]+d)|0;H[4]=(H[4]+e)|0;H[5]=(H[5]+f)|0;H[6]=(H[6]+g)|0;H[7]=(H[7]+h)|0;
+      }
+      var out = [];
+      for (i = 0; i < 8; i++) out.push((H[i]>>>24)&0xff,(H[i]>>>16)&0xff,(H[i]>>>8)&0xff,H[i]&0xff);
+      return out;
+    }
+
+    // ---- SHA-1 (bytes -> 20 bytes) ----
+    function sha1Bytes(bytes) {
+      var H = [0x67452301,0xEFCDAB89,0x98BADCFE,0x10325476,0xC3D2E1F0];
+      var m = bytes.slice(), l = bytes.length;
+      m.push(0x80); while (m.length % 64 !== 56) m.push(0);
+      var hi = Math.floor(l / 0x20000000), lo = (l * 8) >>> 0;
+      m.push((hi>>>24)&0xff,(hi>>>16)&0xff,(hi>>>8)&0xff,hi&0xff,(lo>>>24)&0xff,(lo>>>16)&0xff,(lo>>>8)&0xff,lo&0xff);
+      function rl(x,n){return (x<<n)|(x>>>(32-n));}
+      var w = new Array(80);
+      for (var off = 0; off < m.length; off += 64) {
+        for (var i = 0; i < 16; i++) w[i] = (m[off+i*4]<<24)|(m[off+i*4+1]<<16)|(m[off+i*4+2]<<8)|(m[off+i*4+3]);
+        for (i = 16; i < 80; i++) w[i] = rl(w[i-3]^w[i-8]^w[i-14]^w[i-16], 1);
+        var a=H[0],b=H[1],c=H[2],d=H[3],e=H[4];
+        for (i = 0; i < 80; i++) {
+          var f, k;
+          if (i < 20) { f = (b&c)|(~b&d); k = 0x5A827999; }
+          else if (i < 40) { f = b^c^d; k = 0x6ED9EBA1; }
+          else if (i < 60) { f = (b&c)|(b&d)|(c&d); k = 0x8F1BBCDC; }
+          else { f = b^c^d; k = 0xCA62C1D6; }
+          var t = (rl(a,5)+f+e+k+w[i])|0;
+          e=d;d=c;c=rl(b,30);b=a;a=t;
+        }
+        H[0]=(H[0]+a)|0;H[1]=(H[1]+b)|0;H[2]=(H[2]+c)|0;H[3]=(H[3]+d)|0;H[4]=(H[4]+e)|0;
+      }
+      var out = [];
+      for (i = 0; i < 5; i++) out.push((H[i]>>>24)&0xff,(H[i]>>>16)&0xff,(H[i]>>>8)&0xff,H[i]&0xff);
+      return out;
+    }
+
+    // ---- MD5 (bytes -> 16 bytes) ----
+    function md5Bytes(bytes) {
+      function add(a,b){return (a+b)|0;}
+      function rl(x,c){return (x<<c)|(x>>>(32-c));}
+      var m = bytes.slice(), l = bytes.length;
+      m.push(0x80); while (m.length % 64 !== 56) m.push(0);
+      var lo = (l * 8) >>> 0, hi = Math.floor(l / 0x20000000);
+      m.push(lo&0xff,(lo>>>8)&0xff,(lo>>>16)&0xff,(lo>>>24)&0xff,hi&0xff,(hi>>>8)&0xff,(hi>>>16)&0xff,(hi>>>24)&0xff);
+      var S = [7,12,17,22,7,12,17,22,7,12,17,22,7,12,17,22,5,9,14,20,5,9,14,20,5,9,14,20,5,9,14,20,4,11,16,23,4,11,16,23,4,11,16,23,4,11,16,23,6,10,15,21,6,10,15,21,6,10,15,21,6,10,15,21];
+      var T = [];
+      for (var n = 0; n < 64; n++) T[n] = (Math.floor(Math.abs(Math.sin(n + 1)) * 4294967296)) | 0;
+      var a0=0x67452301,b0=0xefcdab89,c0=0x98badcfe,d0=0x10325476;
+      var w = new Array(16);
+      for (var off = 0; off < m.length; off += 64) {
+        for (var i = 0; i < 16; i++) w[i] = m[off+i*4]|(m[off+i*4+1]<<8)|(m[off+i*4+2]<<16)|(m[off+i*4+3]<<24);
+        var A=a0,B=b0,C=c0,D=d0;
+        for (i = 0; i < 64; i++) {
+          var F, g;
+          if (i < 16) { F = (B&C)|(~B&D); g = i; }
+          else if (i < 32) { F = (D&B)|(~D&C); g = (5*i+1)%16; }
+          else if (i < 48) { F = B^C^D; g = (3*i+5)%16; }
+          else { F = C^(B|~D); g = (7*i)%16; }
+          F = add(add(add(F, A), T[i]), w[g]);
+          A=D;D=C;C=B;B=add(B, rl(F, S[i]));
+        }
+        a0=add(a0,A);b0=add(b0,B);c0=add(c0,C);d0=add(d0,D);
+      }
+      var out = [];
+      [a0,b0,c0,d0].forEach(function (x) { out.push(x&0xff,(x>>>8)&0xff,(x>>>16)&0xff,(x>>>24)&0xff); });
+      return out;
+    }
+
+    function hmac(hashBytes, blockSize, keyStr, msgStr) {
+      var key = utf8Bytes(keyStr);
+      if (key.length > blockSize) key = hashBytes(key);
+      while (key.length < blockSize) key.push(0);
+      var ipad = [], opad = [];
+      for (var i = 0; i < blockSize; i++) { ipad.push(key[i]^0x36); opad.push(key[i]^0x5c); }
+      var inner = hashBytes(ipad.concat(utf8Bytes(msgStr)));
+      return hashBytes(opad.concat(inner));
+    }
+
+    return {
+      md5: function (s) { return bytesToHex(md5Bytes(utf8Bytes(s))); },
+      sha1: function (s) { return bytesToHex(sha1Bytes(utf8Bytes(s))); },
+      sha256: function (s) { return bytesToHex(sha256Bytes(utf8Bytes(s))); },
+      hmacSha1: function (key, msg) { return bytesToHex(hmac(sha1Bytes, 64, key, msg)); },
+      hmacSha256: function (key, msg) { return bytesToHex(hmac(sha256Bytes, 64, key, msg)); },
+      base64Encode: function (s) { var b = utf8Bytes(s), str = ''; for (var i = 0; i < b.length; i++) str += String.fromCharCode(b[i]); return btoa(str); },
+      base64Decode: function (s) { var bin = atob(s), arr = []; for (var i = 0; i < bin.length; i++) arr.push(bin.charCodeAt(i)); try { return new TextDecoder().decode(new Uint8Array(arr)); } catch (_) { return bin; } }
+    };
+  })();
 
   // === Build optimized matching indexes from rules ===
   function buildIndexes() {
@@ -160,10 +324,16 @@ if (window.__APII_INIT) { /* already injected */ } else { window.__APII_INIT = t
 
   function applyReq(url, hdrs, body, actions) {
     var u = url, b = body, h = {}; for (var k in hdrs) h[k] = hdrs[k];
-    var cancelled = false; var delayMs = 0; var bodyChanged = false;
+    var cancelled = false; var delayMs = 0; var bodyChanged = false; var hadInject = false;
 
-    for (var i = 0; i < actions.length; i++) {
-      var a = actions[i];
+    // 签名类脚本必须在 body/header 改写之后运行，才能对最终请求体重算签名。
+    // 稳定排序把 injectScript 挪到最后，避免规则里动作顺序摆错导致重签失效。
+    var ordered = actions.slice().sort(function (x, y) {
+      return (x.type === 'injectScript' ? 1 : 0) - (y.type === 'injectScript' ? 1 : 0);
+    });
+
+    for (var i = 0; i < ordered.length; i++) {
+      var a = ordered[i];
       switch (a.type) {
         case 'modifyRequestUrl':
           if (a.operate === 'replace') { var re = safeRe(a.key, 'g'); if (re) u = u.replace(re, a.value); }
@@ -194,9 +364,16 @@ if (window.__APII_INIT) { /* already injected */ } else { window.__APII_INIT = t
         case 'delay': delayMs = Math.max(delayMs, Math.min(parseInt(a.value) || 0, 30000)); break;
         case 'injectScript':
           try {
-            var _ctx = { url: u, headers: h, body: b };
+            hadInject = true;
+            var _bBefore = b;
+            // ctx.crypto 暴露同步签名工具；改写后请求头/请求体/URL 均可回写。
+            var _ctx = { url: u, headers: h, body: b, crypto: API_CRYPTO };
             new Function('ctx', a.value)(_ctx);
             u = _ctx.url; b = _ctx.body;
+            // 脚本可能整体替换了 headers 对象（而非原地改），显式回写
+            if (_ctx.headers && _ctx.headers !== h) { h = {}; for (var _hk in _ctx.headers) h[_hk] = _ctx.headers[_hk]; }
+            // 脚本改了 body → 与 modifyRequestBody 一样需清除 content-length，交由浏览器重算
+            if (b !== _bBefore) bodyChanged = true;
           } catch (err) {
             // 白盒化：将注入脚本报错暴露给测试人员，而非静默吞掉
             var errMsg = 'injectScript 执行错误: ' + (err && err.message ? err.message : String(err));
@@ -207,7 +384,17 @@ if (window.__APII_INIT) { /* already injected */ } else { window.__APII_INIT = t
       }
     }
     if (bodyChanged) { delete h['content-length']; }
-    return { url: u, headers: h, body: b, cancelled: cancelled, delayMs: delayMs };
+    // 诊断：请求体被改写、带签名头、且未用 injectScript 补偿 → 服务端签名校验大概率失败（401→跳登录）
+    var warnings = [];
+    if (bodyChanged && !hadInject) {
+      var signHit = detectSignHeaders(h);
+      if (signHit.length > 0) {
+        warnings.push('请求体已被改写，但检测到签名/鉴权头 [' + signHit.join(', ') +
+          ']，其值仍基于原始请求体，服务端校验可能失败（常表现为 401 后跳转登录）。' +
+          '如需生效，请加一条 injectScript 动作，用改写后的 ctx.body 重算签名头（可用 ctx.crypto.md5/sha256/hmacSha256 等）。');
+      }
+    }
+    return { url: u, headers: h, body: b, cancelled: cancelled, delayMs: delayMs, warnings: warnings };
   }
 
   function applyResp(status, statusText, hdrs, body, actions) {
@@ -267,7 +454,8 @@ if (window.__APII_INIT) { /* already injected */ } else { window.__APII_INIT = t
       ruleIds: ctx.ruleIds, ruleNames: ctx.ruleNames,
       originalRequest: ctx.origReq, modifiedRequest: ctx.modReq,
       originalResponse: origResp || undefined, modifiedResponse: modResp || undefined,
-      cancelled: false, delayed: ctx.delayMs > 0, delayMs: ctx.delayMs
+      cancelled: false, delayed: ctx.delayMs > 0, delayMs: ctx.delayMs,
+      warnings: (ctx.warnings && ctx.warnings.length) ? ctx.warnings : undefined
     };
   }
 
@@ -392,8 +580,11 @@ if (window.__APII_INIT) { /* already injected */ } else { window.__APII_INIT = t
       origUrl: origUrl, method: method,
       ruleIds: rules.map(function (r) { return r.id; }),
       ruleNames: rules.map(function (r) { return r.name; }),
-      origReq: origReq, modReq: modReq, delayMs: rm.delayMs
+      origReq: origReq, modReq: modReq, delayMs: rm.delayMs, warnings: rm.warnings
     };
+    if (rm.warnings && rm.warnings.length) {
+      for (var _wi = 0; _wi < rm.warnings.length; _wi++) console.warn('[ApiMockFlow] ' + rm.warnings[_wi]);
+    }
 
     if (rm.cancelled) {
       postLog({
@@ -461,7 +652,10 @@ if (window.__APII_INIT) { /* already injected */ } else { window.__APII_INIT = t
       var xhrRuleNames = rules.map(function(r){return r.name;});
 
       function xhrLog(origResp, modResp, cancelled) {
-        postLog({ id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6), timestamp: Date.now(), url: ou, method: om, ruleIds: xhrRuleIds, ruleNames: xhrRuleNames, originalRequest: xhrOrigReq, modifiedRequest: xhrModReq, originalResponse: origResp || undefined, modifiedResponse: modResp || undefined, cancelled: !!cancelled, delayed: rm.delayMs > 0, delayMs: rm.delayMs });
+        postLog({ id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6), timestamp: Date.now(), url: ou, method: om, ruleIds: xhrRuleIds, ruleNames: xhrRuleNames, originalRequest: xhrOrigReq, modifiedRequest: xhrModReq, originalResponse: origResp || undefined, modifiedResponse: modResp || undefined, cancelled: !!cancelled, delayed: rm.delayMs > 0, delayMs: rm.delayMs, warnings: (rm.warnings && rm.warnings.length) ? rm.warnings : undefined });
+      }
+      if (rm.warnings && rm.warnings.length) {
+        for (var _xwi = 0; _xwi < rm.warnings.length; _xwi++) console.warn('[ApiMockFlow] ' + rm.warnings[_xwi]);
       }
 
       function doXHRSend() {
@@ -471,42 +665,51 @@ if (window.__APII_INIT) { /* already injected */ } else { window.__APII_INIT = t
           setTimeout(function(){self.dispatchEvent(new Event('load'));},0);
           return;
         }
-        var hk = Object.keys(rm.headers);
-        for (var i2 = 0; i2 < hk.length; i2++) { try { _XHR_setRH.call(self, hk[i2], rm.headers[hk[i2]]); } catch (_) {} }
+        // 关键修复：self 上已带业务代码设好的原始请求头。XHR 的 setRequestHeader 对同名头是
+        // 「追加合并」而非覆盖（Authorization: x → "x, x"），因此绝不能在 self 上重设已有头，
+        // 否则会破坏 Authorization/Token 等导致 401。无头变化时只改 body、不动头。
+        var hdrChanged = hdrsChanged(orh, rm.headers);
 
-        if (rm.url !== ou) {
-          // URL redirect: create proxy XHR with timeout and error handling
+        if (rm.url !== ou || hdrChanged) {
+          // 需要改 URL，或增/删/改请求头 → 用全新代理 XHR，请求头只干净地设一次
           var px = new NATIVE_XHR();
           try { px.open(om, rm.url, true); } catch (openErr) {
-            // 重定向目标 URL 打开失败（如非法 URL）→ 通知调用方网络错误
+            // 打开失败（如非法 URL）→ 通知调用方网络错误
             self.dispatchEvent(new Event('error'));
             xhrLog(null, null, false);
             return;
           }
-          // Copy timeout from original XHR
+          // 继承原 XHR 的凭证/超时/响应类型——否则代理请求会丢 Cookie(withCredentials) 造成鉴权失败
+          try { px.withCredentials = self.withCredentials; } catch (_) {}
           try { if (self.timeout) px.timeout = self.timeout; } catch (_) {}
+          try { if (self.responseType) px.responseType = self.responseType; } catch (_) {}
           var hk2 = Object.keys(rm.headers);
           for (var i3 = 0; i3 < hk2.length; i3++) { try { px.setRequestHeader(hk2[i3], rm.headers[hk2[i3]]); } catch (_) {} }
 
-          // Timeout handler
+          // Timeout handler —— 置 _xrm 抢占，避免超时后 onreadystatechange(4) 再派发一个 status=0 的假 load
           px.ontimeout = function() {
+            if (self._xrm) return;
+            self._xrm = true;
             try { Object.defineProperty(self,'readyState',{value:4,writable:true,configurable:true}); } catch(_) {}
             self.dispatchEvent(new Event('timeout'));
+            self.dispatchEvent(new Event('loadend')); // 现代 axios 只在 onloadend 结算，缺它请求永久挂起
+            xhrLog(null, null, false);
           };
 
           px.onerror = function() {
-            if (!self._xrm) {
-              self._xrm = true;
-              try { Object.defineProperty(self,'status',{value:px.status || 0,writable:true,configurable:true}); } catch(_) {}
-              self.dispatchEvent(new Event('error'));
-              self.dispatchEvent(new Event('load'));
-            }
+            if (self._xrm) return;
+            self._xrm = true;
+            try { Object.defineProperty(self,'status',{value:px.status || 0,writable:true,configurable:true}); } catch(_) {}
+            self.dispatchEvent(new Event('error'));
+            // 网络错误按规范只应有 error + loadend，不派发 load（否则监听 load 的库会把网络错误误当成 status=0 的响应）
+            self.dispatchEvent(new Event('loadend'));
+            xhrLog(null, null, false);
           };
 
           px.onreadystatechange = function () {
             if (px.readyState === 4 && !self._xrm) {
               self._xrm = true;
-              var rb = px.responseText || '';
+              var rb = ''; try { rb = px.responseText || ''; } catch (_) { rb = ''; } // responseType 非文本时读 responseText 会抛
               var rh = parseHdr(px.getAllResponseHeaders());
               var xhrOrigResp = { status: px.status, statusText: px.statusText, headers: rh, body: trunc(rb, 2000) };
               if (respA.length > 0) {
@@ -519,6 +722,7 @@ if (window.__APII_INIT) { /* already injected */ } else { window.__APII_INIT = t
               try{Object.defineProperty(self,'readyState',{value:4,writable:true,configurable:true});}catch(_){}
               self.dispatchEvent(new Event('readystatechange'));
               self.dispatchEvent(new Event('load'));
+              self.dispatchEvent(new Event('loadend')); // 现代 axios 只在 onloadend 结算，缺它请求永久挂起
               // 注意：HTTP 4xx/5xx 是"成功完成的传输"，原生 XHR 只通过 load 事件 + status 暴露，
               // 不派发 error。此前多派发的 error 会让 axios/jQuery 把正常响应误判为网络错误。
             }
@@ -531,7 +735,8 @@ if (window.__APII_INIT) { /* already injected */ } else { window.__APII_INIT = t
           return;
         }
 
-        // No URL redirect — intercept response
+        // 无 URL 变化、无请求头增删改（至多改了 body）→ 保留 self 上业务代码设好的原始头不动，
+        // 只把（可能改写过的）body 发出去；在原生 XHR 上拦截响应
         if (respA.length > 0) {
           self.addEventListener('readystatechange', function h() {
             if (self.readyState === 4 && !self._xrm) {
