@@ -11,7 +11,7 @@ Chrome 浏览器扩展 — API 请求拦截、Mock 数据注入、接口调试�
 - 修改响应 Header / Body / 状态码
 - 重定向、拦截（取消）请求
 - 延迟响应模拟（毫秒级）
-- 注入自定义 JavaScript 脚本
+- 注入自定义 JavaScript 脚本（`ctx = { url, headers, body, crypto }`，恒在请求体/头改写之后执行；内置同步 `crypto`：md5 / sha1 / sha256 / hmacSha1 / hmacSha256 / base64，可用改写后的 body 重算签名头）
 
 **规则匹配**
 - 4 种匹配模式：精确 / 包含 / 正则 / 域名
@@ -24,6 +24,7 @@ Chrome 浏览器扩展 — API 请求拦截、Mock 数据注入、接口调试�
 - 实时显示被拦截的请求
 - 原始 vs 修改后请求/响应对比
 - 一键从日志创建规则
+- 签名风险诊断：请求体被改写但带有基于 body 的签名头（且未用 injectScript 重算）时，标记 ⚠ 并提示服务端校验可能失败（常表现为 401 跳登录）
 
 **API 测试器**
 - 多 Tab 请求界面
@@ -61,7 +62,7 @@ Chrome 浏览器扩展 — API 请求拦截、Mock 数据注入、接口调试�
 npm install          # 安装依赖
 npm run dev          # 开发模式
 npm run build        # 生产构建（esbuild 压缩，输出到 dist/）
-npm test             # 运行单测（vitest，107 个用例）
+npm test             # 运行单测（vitest，117 个用例）
 ```
 
 ---
@@ -97,7 +98,8 @@ src/
 │   └── constants.ts          # 常量
 ├── __tests__/
 │   ├── engine.ts             # 匹配引擎（可测试模块）
-│   ├── engine.test.ts        # 引擎/规则匹配单测
+│   ├── engine.test.ts        # 引擎/规则匹配、injectScript 排序与签名告警单测
+│   ├── import-parser.test.ts # cURL/HTTPie/OpenAPI 解析单测
 │   ├── json-format.test.ts   # JSON 格式化/修复/压缩单测
 │   └── jwt.test.ts           # JWT 解析单测
 └── styles/global.css         # 全局样式 + 暗色模式
