@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { matchUrl, getMatchingRules, applyReq, applyResp } from './engine';
+import { matchUrl, getMatchingRules, applyReq, applyResp, detectSignHeaders } from './engine';
 import { Rule, Action } from '../shared/types';
 
 // === Helper to create test rules ===
@@ -308,5 +308,95 @@ describe('edge cases', () => {
       makeAction({ type: 'modifyStatusCode', operate: 'set', value: 'abc' }),
     ]);
     expect(result.status).toBe(200);
+  });
+});
+
+// ============================================================
+// TEST: detectSignHeaders — 只报基于 body 的签名头，不误报静态凭证
+// ============================================================
+describe('detectSignHeaders', () => {
+  it('flags name-based signature headers', () => {
+    expect(detectSignHeaders({ 'X-Sign': 'abc' })).toEqual(['X-Sign']);
+    expect(detectSignHeaders({ 'X-Signature': 'abc' })).toEqual(['X-Signature']);
+    expect(detectSignHeaders({ 'Content-MD5': 'abc' })).toEqual(['Content-MD5']);
+    expect(detectSignHeaders({ 'x-ca-signature': 'abc' })).toEqual(['x-ca-signature']);
+    expect(detectSignHeaders({ 'X-Gorgon': 'abc' })).toEqual(['X-Gorgon']);
+    expect(detectSignHeaders({ 'digest': 'sha-256=xxx' })).toEqual(['digest']);
+  });
+
+  it('does NOT flag static credentials (the 401 false-positive we removed)', () => {
+    expect(detectSignHeaders({ 'Authorization': 'Bearer eyJhbGciOi...' })).toEqual([]);
+    expect(detectSignHeaders({ 'Authorization': 'Basic dXNlcjpwYXNz' })).toEqual([]);
+    // 用户实际场景：Authorization 是一个不透明 token（UUID 形态），非签名
+    expect(detectSignHeaders({ 'Authorization': 'ec934e82-af26-4d50-a477-108613359931' })).toEqual([]);
+    expect(detectSignHeaders({ 'X-Design-Note': 'anything' })).toEqual([]); // 含 'sign' 子串但非独立词，不误报
+  });
+
+  it('flags Authorization only when its value is a body-based signature (SigV4/HMAC)', () => {
+    expect(detectSignHeaders({ 'Authorization': 'AWS4-HMAC-SHA256 Credential=...,SignedHeaders=host,Signature=abc' }))
+      .toEqual(['Authorization']);
+    expect(detectSignHeaders({ 'Authorization': 'HMAC-SHA256 Signature=abc' })).toEqual(['Authorization']);
+  });
+});
+
+// ============================================================
+// TEST: applyReq — 今日新增的 injectScript 排序 / body 变更 / 签名告警
+// ============================================================
+describe('applyReq — injectScript ordering & sign warnings', () => {
+  it('runs injectScript LAST even when authored before body edits', () => {
+    // 规则里 injectScript 写在 modifyRequestBody 之前，仍应看到已替换后的 body
+    const result = applyReq('https://a.com', {}, 'hello world', [
+      makeAction({ type: 'injectScript', value: "ctx.headers['x-seen-body'] = ctx.body;" }),
+      makeAction({ type: 'modifyRequestBody', operate: 'replace', key: 'world', value: 'earth' }),
+    ]);
+    expect(result.body).toBe('hello earth');
+    expect(result.headers['x-seen-body']).toBe('hello earth'); // 证明 inject 在 body 改写之后运行
+  });
+
+  it('injectScript can rewrite body and it clears content-length', () => {
+    const result = applyReq('https://a.com', { 'content-length': '11' }, 'hello world', [
+      makeAction({ type: 'injectScript', value: "ctx.body = ctx.body.toUpperCase();" }),
+    ]);
+    expect(result.body).toBe('HELLO WORLD');
+    expect(result.headers['content-length']).toBeUndefined();
+  });
+
+  it('injectScript can replace the whole headers object', () => {
+    const result = applyReq('https://a.com', { 'a': '1' }, 'x', [
+      makeAction({ type: 'injectScript', value: "ctx.headers = { b: '2' };" }),
+    ]);
+    expect(result.headers).toEqual({ b: '2' }); // 旧键被清掉
+  });
+
+  it('warns when body changed + sign header present + no injectScript', () => {
+    const result = applyReq('https://a.com', { 'X-Sign': 'old' }, 'body', [
+      makeAction({ type: 'modifyRequestBody', operate: 'set', value: 'new' }),
+    ]);
+    expect(result.warnings && result.warnings.length).toBeGreaterThan(0);
+    expect(result.warnings![0]).toContain('X-Sign');
+  });
+
+  it('does NOT warn when an injectScript is present (assumed to re-sign)', () => {
+    const result = applyReq('https://a.com', { 'X-Sign': 'old' }, 'body', [
+      makeAction({ type: 'modifyRequestBody', operate: 'set', value: 'new' }),
+      makeAction({ type: 'injectScript', value: "ctx.headers['X-Sign'] = 'recomputed';" }),
+    ]);
+    expect(result.warnings).toEqual([]);
+    expect(result.headers['X-Sign']).toBe('recomputed');
+  });
+
+  it('does NOT warn when body unchanged even if sign header present', () => {
+    const result = applyReq('https://a.com', { 'X-Sign': 'old' }, 'body', [
+      makeAction({ type: 'modifyRequestHeader', operate: 'set', key: 'X-Other', value: '1' }),
+    ]);
+    expect(result.warnings).toEqual([]);
+  });
+
+  it('does NOT warn when body changed but no sign header (plain body edit — the user scenario)', () => {
+    const result = applyReq('https://a.com', { 'Authorization': 'some-uuid-token' }, '观察', [
+      makeAction({ type: 'modifyRequestBody', operate: 'replace', key: '观察', value: '观测' }),
+    ]);
+    expect(result.body).toBe('观测');
+    expect(result.warnings).toEqual([]); // Authorization 是不透明 token，不应误报
   });
 });
