@@ -2,6 +2,8 @@
 
 Chrome 浏览器扩展 — API 请求拦截、Mock 数据注入、接口调试一体化工具。
 
+> 当前版本 **v1.7.0** · [下载最新 Release](https://github.com/gaogx96/ApiMockFlow/releases/latest)
+
 ---
 
 ## 功能
@@ -38,8 +40,8 @@ Chrome 浏览器扩展 — API 请求拦截、Mock 数据注入、接口调试�
 - 响应 JSON 语法高亮
 
 **其他**
-- 暗色模式
-- 规则编辑器全屏模式
+- 石墨薄雾主题：亮 / 暗双主题，一键切换
+- 独立窗口模式：完整界面可在独立浏览器窗口中打开（`?window=1`）
 - Toast 通知（替代 alert/confirm）
 - 页面 Badge 显示实时拦截数
 - 安装后自动注入已有标签页（无需刷新）
@@ -62,7 +64,7 @@ Chrome 浏览器扩展 — API 请求拦截、Mock 数据注入、接口调试�
 npm install          # 安装依赖
 npm run dev          # 开发模式
 npm run build        # 生产构建（esbuild 压缩，输出到 dist/）
-npm test             # 运行单测（vitest，117 个用例）
+npm test             # 运行单测（vitest，119 个用例）
 ```
 
 ---
@@ -84,8 +86,10 @@ src/
 ├── background/index.ts      # Service Worker：规则引擎、消息处理、API 代理
 ├── content/index.ts          # Content Script：状态同步、Badge、脚本注入
 ├── popup/
-│   ├── App.tsx               # 主布局（顶部 Tab 导航）
+│   ├── App.tsx               # 主布局（顶部 Tab 导航、主题切换、独立窗口入口）
 │   ├── ErrorBoundary.tsx     # 渲染错误兜底
+│   ├── compositor.ts         # 弹窗合成器“推迟呈现”节流绕过
+│   ├── components/           # 共享 UI 组件（Icon/Select/TabStrip/SearchBar/KeyValueEditor/Tooltip）
 │   └── pages/
 │       ├── RuleList.tsx      # 规则列表（搜索防抖、分组筛选）
 │       ├── RuleEditor.tsx    # 规则编辑器（全屏模式支持）
@@ -102,7 +106,7 @@ src/
 │   ├── import-parser.test.ts # cURL/HTTPie/OpenAPI 解析单测
 │   ├── json-format.test.ts   # JSON 格式化/修复/压缩单测
 │   └── jwt.test.ts           # JWT 解析单测
-└── styles/global.css         # 全局样式 + 暗色模式
+└── styles/global.css         # 全局样式 + 石墨薄雾 亮/暗双主题
 ```
 
 ---
@@ -114,6 +118,17 @@ src/
 - 导入校验：规则数量限制、字段校验、injectScript 自动剥离
 - 响应体截断：Mock 响应 2MB 上限，API 测试响应 100KB 截断
 - 生产构建：esbuild 压缩、sourcemap 关闭、console 已清理
+
+---
+
+## 更新日志
+
+### v1.7.0
+- **石墨薄雾 UI 改版**：全新亮/暗双主题，一键切换；新增共享组件（Icon/Select/TabStrip/SearchBar/KeyValueEditor/Tooltip），弹窗改圆角浮卡布局
+- 移除废弃的全屏模式，改用独立窗口模式（`?window=1`）
+- 引擎修复：XHR 代理改头/改 URL 只记一条规则日志；responseType 感知的 Mock 投递（json 解析为对象 / text / 二进制回退）；改请求不改响应场景正确回传；修复请求改写破坏鉴权导致的 401
+- 弹窗合成器“推迟呈现”节流绕过：展开分组、保存/导入/白名单对话框不再延迟数秒上屏
+- 拦截日志分视图刷新独立 / 持久化 / 冻结；API 测试页标签持久化 / 重命名 / 分组
 
 ---
 
