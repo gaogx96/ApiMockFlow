@@ -13,7 +13,6 @@ import {
  * - 统一 strokeWidth 1.5；尺寸约定 14 / 16 / 18（特例：12 微型关闭、24/32 空状态）。
  * - color 继承 currentColor；装饰图标默认 aria-hidden，
  *   一旦调用方传入 aria-label（有独立语义的图标）则自动移除 aria-hidden。
- * 事实源：D:\maplocal\UI优化\icons-buttons-spec.html
  */
 export type IconName =
   | 'activity' | 'alert-triangle' | 'arrow-right-to-line' | 'bookmark' | 'bookmark-x' | 'braces' | 'check' | 'chevron-down' | 'chevron-left'

@@ -4,7 +4,6 @@
 
 /* =====================================================================
    ApiMockFlow · 石墨薄雾 / 石墨薄雾·夜
-   事实源：D:\maplocal\UI优化\icons-buttons-spec.html
    语义色跨页固定：绿 --ok=成功/启用；锈红 --clay=请求已修改/危险；
    黄 --warn-fg=警告/签名风险；蓝灰 --info=信息/普通；灰 --faint=禁用/无数据。
    暗色沿用 html.dark（匹配 App.tsx 的 classList 切换，不用 data-theme）。
