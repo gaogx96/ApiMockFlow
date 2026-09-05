@@ -11,7 +11,9 @@
     "test:watch": "vitest"
   },
   "dependencies": {
-    "@heroicons/react": "^2.2.0",
+    "@fontsource/hanken-grotesk": "5.2.5",
+    "@fontsource/space-mono": "5.2.5",
+    "lucide-react": "0.468.0",
     "react": "^19.1.0",
     "react-dom": "^19.1.0"
   },

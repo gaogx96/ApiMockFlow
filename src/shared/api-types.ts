@@ -3,7 +3,15 @@ export interface ApiRequest {
   url: string;
   headers: Record<string, string>;
   body?: string;
-  bodyType: 'raw' | 'form' | 'urlencoded';
+  bodyType: 'raw' | 'form' | 'urlencoded' | 'multipart';
+  unsupported?: string[];
+}
+
+export interface MultipartPart {
+  name: string;
+  value: string;
+  fileName?: string;
+  contentType?: string;
 }
 
 export interface ApiResponse {
@@ -30,6 +38,8 @@ export interface SavedRequest {
   timestamp: number;
   /** 发送时是否用浏览器当前有效 Cookie 覆盖已保存的 Cookie 头 */
   autoRefreshCookie?: boolean;
+  /** 所属分组 id（对应 apiSavedGroups；缺省=未分组）。UI 层字段，后台透传存储。 */
+  groupId?: string;
 }
 
 export interface RequestDiagnostic {

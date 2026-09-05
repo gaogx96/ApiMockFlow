@@ -60,6 +60,8 @@ export interface AppState {
   globalEnabled: boolean;
   rules: Rule[];
   groups: RuleGroup[];
+  observeEnabled?: boolean;
+  observeResourceTypes?: string[];
 }
 
 // ==================== 拦截日志 ====================
@@ -71,8 +73,8 @@ export interface InterceptedRequest {
   method: string;
   ruleIds: string[];
   ruleNames: string[];
-  originalRequest: { headers: Record<string, string>; body?: string };
-  modifiedRequest: { url: string; headers: Record<string, string>; body?: string };
+  originalRequest: { headers: Record<string, string>; body?: string; bodyType?: 'multipart' };
+  modifiedRequest: { url: string; headers: Record<string, string>; body?: string; bodyType?: 'multipart' };
   originalResponse?: { status: number; statusText: string; headers: Record<string, string>; body: string };
   modifiedResponse?: { status: number; statusText: string; headers: Record<string, string>; body: string };
   cancelled: boolean;
@@ -80,6 +82,13 @@ export interface InterceptedRequest {
   delayMs: number;
   /** 诊断提示（如：请求体被改写但带签名头，服务端校验可能失败） */
   warnings?: string[];
+  kind?: 'rule-applied' | 'rule-cancelled' | 'rule-error' | 'observed' | 'replay';
+  resourceType?: string;
+}
+
+export interface CreateRuleContext {
+  log: InterceptedRequest;
+  mode: 'request' | 'response';
 }
 
 // ==================== 消息通信 ====================

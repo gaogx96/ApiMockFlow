@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
-  detectFormat, parseCurl, parseHttpie, parseOpenAPI, parseImport,
+  detectFormat, parseCurl, parseHttpie, parseOpenAPI, parseImport, parseMultipartBody,
 } from '../shared/import-parser';
 
 // ============================================================
@@ -35,6 +35,15 @@ describe('detectFormat', () => {
 // parseCurl
 // ============================================================
 describe('parseCurl', () => {
+  it('解析 multipart raw body 为字段数组', () => {
+    const boundary = '----TestBoundary';
+    const body = `--${boundary}\r\nContent-Disposition: form-data; name="id"\r\n\r\n2020482\r\n--${boundary}\r\nContent-Disposition: form-data; name="empty"\r\n\r\n\r\n--${boundary}--\r\n`;
+    expect(parseMultipartBody(body, `multipart/form-data; boundary=${boundary}`)).toEqual([
+      { name: 'id', value: '2020482' },
+      { name: 'empty', value: '' },
+    ]);
+  });
+
   it('裸 URL，默认 GET', () => {
     const r = parseCurl('curl https://api.example.com/users');
     expect(r.method).toBe('GET');
@@ -67,6 +76,12 @@ describe('parseCurl', () => {
   it('--data-raw / --data-binary 作为 body', () => {
     expect(parseCurl(`curl https://a.com --data-raw 'raw'`).body).toBe('raw');
     expect(parseCurl(`curl https://a.com --data-binary 'bin'`).body).toBe('bin');
+  });
+
+  it('-F 文件字段标记为不支持，避免静默当作文本重放', () => {
+    const r = parseCurl(`curl https://a.com -F 'file=@C:/tmp/demo.png' -F 'name=test'`);
+    expect(r.bodyType).toBe('multipart');
+    expect(r.unsupported?.[0]).toContain('文件字段 file');
   });
 
   it('--data=value 紧凑形式', () => {

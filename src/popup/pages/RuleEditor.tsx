@@ -1,21 +1,82 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useRef } from 'react';
 import {
-  Rule, RuleGroup, RuleMatch, Action, ActionType, MatchType,
+  Rule, RuleGroup, RuleMatch, Action, ActionType, MatchType, CreateRuleContext,
   ACTION_TYPE_LABELS, OPERATE_TYPE_LABELS, MATCH_TYPE_LABELS
 } from '../../shared/types';
 import { generateId, HTTP_METHODS, RESOURCE_TYPES, GROUP_COLORS } from '../../shared/constants';
-import { ArrowsPointingOutIcon } from '@heroicons/react/24/outline';
+import Icon from '../components/Icon';
+import Select from '../components/Select';
+import SearchBar from '../components/SearchBar';
+import { useTextareaSearch } from '../components/search';
 import { showToast } from '../../shared/toast';
 import { repairAndFormatJson, minifyJson } from '../../shared/json-format';
 
-const isFullscreen = window.location.pathname.includes('popup-fullscreen');
+/**
+ * 修改请求体/响应体的编辑框：内建关键字搜索（原生选区定位）。
+ * 独立成组件，以便在 actions.map 中为每个 body 动作各持一份搜索态（Hook 不可在循环里调用）。
+ */
+function BodyValueField({ value, onChange, placeholder, rows, hasError, showFormat, onFormat, onMinify }: {
+  value: string;
+  onChange: (v: string) => void;
+  placeholder: string;
+  rows: number;
+  hasError: boolean;
+  showFormat: boolean;
+  onFormat: () => void;
+  onMinify: () => void;
+}) {
+  const ref = useRef<HTMLTextAreaElement>(null);
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState('');
+  const s = useTextareaSearch(ref, value, open ? query : '');
+  return (
+    <>
+      <div className="flex justify-end items-center gap-2 mb-1">
+        {showFormat && (
+          <>
+            <button type="button" onClick={onFormat} className="text-xs text-primary-500 hover:text-primary-600 font-medium"
+              title="格式化 JSON（缩进 2 空格）；能自动修复常见错误：多余逗号、单引号、缺引号、注释、缺括号、中文标点等">格式化 JSON</button>
+            <button type="button" onClick={onMinify} className="text-xs text-gray-400 hover:text-gray-600 dark:hover:text-slate-300 font-medium"
+              title="压缩 JSON：去掉所有空白压成一行（先尝试修复再压缩）">压缩</button>
+          </>
+        )}
+        <button type="button" onClick={() => setOpen(o => !o)} className={`btn-ghost p-1 ${open ? 'text-primary-600' : ''}`}
+          aria-label="搜索" data-tip="搜索关键字"><Icon name="search" size={14} /></button>
+      </div>
+      {open && (
+        <div className="mb-1">
+          <SearchBar
+            query={query}
+            onQueryChange={setQuery}
+            count={s.count}
+            index={s.index}
+            onNext={s.next}
+            onPrev={s.prev}
+            onClose={() => { setOpen(false); setQuery(''); }}
+            placeholder="在内容中搜索…"
+          />
+        </div>
+      )}
+      <textarea
+        ref={ref}
+        placeholder={placeholder}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        rows={rows}
+        className={`form-textarea text-xs w-full ${hasError ? 'border-red-400 focus:border-red-400 focus:ring-red-100' : ''}`}
+      />
+    </>
+  );
+}
 
 interface Props {
   rule: Rule | null;
   groups: RuleGroup[];
   onSave: () => void;
   onCancel: () => void;
+  onBack?: () => void;
   prefill?: Partial<RuleMatch> | null;
+  createContext?: CreateRuleContext | null;
 }
 
 const DEFAULT_MATCH: RuleMatch = { url: '', matchType: 'contains', method: '', resourceType: '' };
@@ -27,25 +88,53 @@ const DEFAULT_ACTION: Action = {
   value: '',
 };
 
-export default function RuleEditor({ rule, groups, onSave, onCancel, prefill }: Props) {
+export default function RuleEditor({ rule, groups, onSave, onCancel, onBack, prefill, createContext }: Props) {
   const isEdit = !!rule;
-  const [name, setName] = useState(rule?.name || '');
+  const [name, setName] = useState(rule?.name || (createContext ? `${createContext.mode === 'request' ? '修改请求' : 'Mock 响应'} ${createContext.log.method} ${createContext.log.url}` : ''));
   const [groupId, setGroupId] = useState(rule?.groupId || 'default');
+  const contextLog = createContext?.log;
   const [match, setMatch] = useState<RuleMatch>(rule?.match || {
-    url: prefill?.url || '',
-    matchType: prefill?.matchType || 'contains',
-    method: prefill?.method || '',
-    resourceType: prefill?.resourceType || '',
+    url: contextLog?.url || prefill?.url || '', matchType: contextLog ? 'exact' : (prefill?.matchType || 'contains'),
+    method: contextLog?.method || prefill?.method || '', resourceType: contextLog?.resourceType || prefill?.resourceType || '',
   });
-  const [actions, setActions] = useState<Action[]>(rule?.actions || [{ ...DEFAULT_ACTION }]);
+  const initialActions = (): Action[] => {
+    if (!createContext || !contextLog) return rule?.actions || [{ ...DEFAULT_ACTION }];
+    if (createContext.mode === 'response') {
+      const response = contextLog.modifiedResponse || contextLog.originalResponse;
+      const acts: Action[] = [];
+      if (response) acts.push({ type: 'modifyResponseBody', operate: 'set', key: '', value: response.body || '' });
+      if (response && response.status !== contextLog.originalResponse?.status) acts.push({ type: 'modifyStatusCode', operate: 'set', key: '', value: String(response.status) });
+      return acts.length ? acts : [{ ...DEFAULT_ACTION }];
+    }
+    const acts: Action[] = [];
+    const original = contextLog.originalRequest, modified = contextLog.modifiedRequest;
+    // 请求观察没有“修改前/修改后”差异，创建请求规则时仍要把完整请求上下文带入，
+    // 让用户可以直接编辑 URL、Header 和 Body，而不是只看到一个 URL 动作。
+    acts.push({ type: 'modifyRequestUrl', operate: 'set', key: '', value: modified.url || contextLog.url });
+    const originalHeaders = original.headers || {}, modifiedHeaders = modified.headers || {};
+    const headerMap = new Map<string, { name: string; oldValue?: string; newValue?: string }>();
+    for (const [name, value] of Object.entries(originalHeaders)) {
+      headerMap.set(name.toLowerCase(), { name, oldValue: value });
+    }
+    for (const [name, value] of Object.entries(modifiedHeaders)) {
+      const key = name.toLowerCase();
+      const current = headerMap.get(key);
+      headerMap.set(key, { name: current?.name || name, oldValue: current?.oldValue, newValue: value });
+    }
+    const generatedHeaderSkip = new Set(['content-length', 'host', 'connection', 'accept-encoding']);
+    for (const item of headerMap.values()) {
+      if (item.newValue !== undefined && !generatedHeaderSkip.has(item.name.toLowerCase())) {
+        acts.push({ type: 'modifyRequestHeader', operate: 'set', key: item.name, value: item.newValue });
+      }
+    }
+    if (modified.body !== undefined) acts.push({ type: 'modifyRequestBody', operate: 'set', key: '', value: modified.body || '' });
+    return acts;
+  };
+  const [actions, setActions] = useState<Action[]>(initialActions);
 
   const [showNewGroup, setShowNewGroup] = useState(false);
   const [newGroupName, setNewGroupName] = useState('');
   const [newGroupColor, setNewGroupColor] = useState(GROUP_COLORS[0]);
-  const [testExpanded, setTestExpanded] = useState(false);
-  const [testUrl, setTestUrl] = useState('');
-  const [testMethod, setTestMethod] = useState('');
-  const [testResourceType, setTestResourceType] = useState('');
   const [errors, setErrors] = useState<Record<string, string>>({});
 
   // Memoize regex validity to avoid recompilation on every render
@@ -53,24 +142,6 @@ export default function RuleEditor({ rule, groups, onSave, onCancel, prefill }: 
     if (match.matchType !== 'regex' || !match.url.trim()) return null;
     try { new RegExp(match.url); return true; } catch { return false; }
   }, [match.matchType, match.url]);
-
-  function testMatch() {
-    if (!match.url.trim() || !testUrl.trim()) return null;
-    // URL match
-    var urlOk = false;
-    switch (match.matchType) {
-      case 'exact': urlOk = testUrl === match.url; break;
-      case 'contains': urlOk = testUrl.indexOf(match.url) >= 0; break;
-      case 'regex': try { urlOk = new RegExp(match.url).test(testUrl); } catch (_) { return { ok: false, reason: '正则表达式无效' }; } break;
-      case 'domain': try { var u = new URL(testUrl); urlOk = u.hostname === match.url || u.hostname.endsWith('.' + match.url); } catch (_) { return { ok: false, reason: '测试 URL 格式无效' }; } break;
-    }
-    if (!urlOk) return { ok: false, reason: 'URL 不匹配' };
-    if (match.method && match.method !== testMethod) return { ok: false, reason: '请求方法不匹配' };
-    if (match.resourceType && match.resourceType !== testResourceType) return { ok: false, reason: '资源类型不匹配' };
-    return { ok: true, reason: '匹配成功' };
-  }
-
-  const testResult = useMemo(() => testMatch(), [match.url, match.matchType, match.method, match.resourceType, testUrl, testMethod, testResourceType]);
 
   const updateAction = (index: number, field: keyof Action, value: string) => {
     const newActions = [...actions];
@@ -256,27 +327,25 @@ export default function RuleEditor({ rule, groups, onSave, onCancel, prefill }: 
 
   return (
     <div className="flex flex-col h-full">
-      {/* Header */}
-      <div className="flex items-center justify-between px-4 py-2.5 border-b border-gray-100 dark:border-slate-700 bg-white dark:bg-slate-800">
-        <span className="text-sm font-semibold text-gray-800 dark:text-slate-200">
+      {/* Header — drill-down subheader */}
+      <div className="flex items-center gap-2 px-3 py-2.5 border-b" style={{ borderColor: 'var(--line)', background: 'var(--bar)' }}>
+        {onBack && (
+          <button onClick={onBack} className="btn-ghost" aria-label="返回规则列表" title="返回规则列表">
+            <Icon name="chevron-left" size={18} />
+          </button>
+        )}
+        <span className="text-sm font-semibold" style={{ color: 'var(--text)' }}>
           {isEdit ? '编辑规则' : '新建规则'}
         </span>
-        <div className="flex items-center gap-1">
-          {!isFullscreen && (
-            <button
-              onClick={() => {
-                const params = new URLSearchParams();
-                if (rule) params.set('ruleId', rule.id);
-                else { params.set('new', 'true'); if (match.url) params.set('url', match.url); }
-                chrome.tabs.create({ url: chrome.runtime.getURL('popup-fullscreen.html') + '?' + params.toString() });
-              }}
-              className="text-gray-400 hover:text-gray-600 p-0.5"
-              title="全屏编辑"
-            >
-              <ArrowsPointingOutIcon className="w-4 h-4" />
+        {!isEdit && (
+          <span className="tag tag-gray">草稿</span>
+        )}
+        <div className="flex items-center gap-1 ml-auto">
+          {!onBack && (
+            <button onClick={onCancel} className="btn-ghost" aria-label="关闭" title="关闭">
+              <Icon name="x" size={16} />
             </button>
           )}
-          <button onClick={onCancel} className="text-gray-400 hover:text-gray-600 text-lg leading-none">&times;</button>
         </div>
       </div>
 
@@ -299,27 +368,26 @@ export default function RuleEditor({ rule, groups, onSave, onCancel, prefill }: 
             </div>
             <div>
               <label className="form-label">所属分组</label>
-              <select
+              <Select
                 value={groupId}
-                onChange={(e) => {
-                  if (e.target.value === '__new__') {
+                onChange={(v) => {
+                  if (v === '__new__') {
                     setShowNewGroup(true);
                     setGroupId(generateId());
                   } else {
                     setShowNewGroup(false);
-                    setGroupId(e.target.value);
+                    setGroupId(v);
                   }
                   clearError('group');
                 }}
-                className={`form-select ${errors.group ? 'border-red-400' : ''}`}
-              >
-                {groups.map((g) => (
-                  <option key={g.id} value={g.id}>
-                    {g.name}
-                  </option>
-                ))}
-                <option value="__new__">+ 新建分组</option>
-              </select>
+                className="w-full"
+                invalid={!!errors.group}
+                ariaLabel="所属分组"
+                options={[
+                  ...groups.map((g) => ({ value: g.id, label: g.name })),
+                  { value: '__new__', label: '+ 新建分组' },
+                ]}
+              />
               {errors.group && <p className="text-xs text-red-500 mt-1">{errors.group}</p>}
             </div>
             {showNewGroup && (
@@ -355,16 +423,14 @@ export default function RuleEditor({ rule, groups, onSave, onCancel, prefill }: 
           <h3 className="text-xs font-semibold text-gray-500 dark:text-slate-400 mb-3">匹配条件</h3>
           <div className="space-y-2.5">
             <div className="flex gap-2">
-              <select
+              <Select
                 value={match.matchType}
-                onChange={(e) => { setMatch({ ...match, matchType: e.target.value as MatchType }); clearError('matchUrl'); }}
-                className="form-select shrink-0"
-                style={{ width: '70px' }}
-              >
-                {Object.entries(MATCH_TYPE_LABELS).map(([k, v]) => (
-                  <option key={k} value={k}>{v}</option>
-                ))}
-              </select>
+                onChange={(v) => { setMatch({ ...match, matchType: v as MatchType }); clearError('matchUrl'); }}
+                className="shrink-0"
+                style={{ width: 82 }}
+                ariaLabel="匹配方式"
+                options={Object.entries(MATCH_TYPE_LABELS).map(([k, v]) => ({ value: k, label: v }))}
+              />
               <input
                 type="text"
                 placeholder={
@@ -401,63 +467,22 @@ export default function RuleEditor({ rule, groups, onSave, onCancel, prefill }: 
             )}
             {errors.matchUrl && <p className="text-xs text-red-500 pl-[76px] -mt-1.5">{errors.matchUrl}</p>}
             <div className="flex gap-2">
-              <select
+              <Select
                 value={match.method}
-                onChange={(e) => setMatch({ ...match, method: e.target.value })}
-                className="form-select flex-1"
-              >
-                {HTTP_METHODS.map((m) => (
-                  <option key={m} value={m}>{m || '全部请求方法'}</option>
-                ))}
-              </select>
-              <select
+                onChange={(v) => setMatch({ ...match, method: v })}
+                className="flex-1"
+                ariaLabel="请求方法"
+                options={HTTP_METHODS.map((m) => ({ value: m, label: m || '全部请求方法' }))}
+              />
+              <Select
                 value={match.resourceType}
-                onChange={(e) => setMatch({ ...match, resourceType: e.target.value })}
-                className="form-select flex-1"
-              >
-                {RESOURCE_TYPES.map((t) => (
-                  <option key={t} value={t}>{t || '全部资源类型'}</option>
-                ))}
-              </select>
+                onChange={(v) => setMatch({ ...match, resourceType: v })}
+                className="flex-1"
+                ariaLabel="资源类型"
+                options={RESOURCE_TYPES.map((t) => ({ value: t, label: t || '全部资源类型' }))}
+              />
             </div>
           </div>
-        </div>
-
-        {/* Test Match */}
-        <div className="bg-white dark:bg-slate-800 rounded-xl border border-gray-200 dark:border-slate-700">
-          <button
-            className="flex items-center justify-between w-full px-3 py-2.5 text-left"
-            onClick={() => setTestExpanded(!testExpanded)}
-          >
-            <h3 className="text-xs font-semibold text-gray-500 dark:text-slate-400">测试匹配</h3>
-            <span className="text-xs text-gray-400">{testExpanded ? '▾' : '▸'}</span>
-          </button>
-          {testExpanded && (
-            <div className="px-3 pb-3 space-y-2">
-              <div className="flex gap-1.5">
-                <input type="text" placeholder="输入测试 URL..."
-                  value={testUrl} onChange={e => setTestUrl(e.target.value)}
-                  className="form-input flex-1 text-xs py-1 px-2" />
-                <select value={testMethod} onChange={e => setTestMethod(e.target.value)}
-                  className="form-select text-xs py-1 w-20 pr-5">
-                  <option value="">全部方法</option>
-                  {HTTP_METHODS.filter(m => m).map(m => <option key={m} value={m}>{m}</option>)}
-                </select>
-                <select value={testResourceType} onChange={e => setTestResourceType(e.target.value)}
-                  className="form-select text-xs py-1 w-20 pr-5">
-                  <option value="">全部类型</option>
-                  {RESOURCE_TYPES.filter(t => t).map(t => <option key={t} value={t}>{t}</option>)}
-                </select>
-              </div>
-              {testResult && (
-                <div className={`text-xs py-1.5 px-2 rounded font-medium ${
-                  testResult.ok ? 'bg-green-50 text-green-600 dark:bg-green-900/20 dark:text-green-400' : 'bg-red-50 text-red-500 dark:bg-red-900/20 dark:text-red-400'
-                }`}>
-                  {testResult.ok ? '匹配成功' : '不匹配 — ' + testResult.reason}
-                </div>
-              )}
-            </div>
-          )}
         </div>
 
         {/* Actions */}
@@ -477,31 +502,28 @@ export default function RuleEditor({ rule, groups, onSave, onCancel, prefill }: 
                 <div className="flex items-center justify-between mb-2.5">
                   <div className="flex items-center gap-1.5">
                     <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${isReq ? 'bg-blue-400' : 'bg-green-400'}`} title={isReq ? '请求阶段' : '响应阶段'} />
-                    <select
+                    <Select
                       value={action.type}
-                      onChange={(e) => updateAction(i, 'type', e.target.value)}
-                      className="text-xs font-medium border-none bg-transparent text-gray-700 dark:text-slate-300 focus:outline-none cursor-pointer"
-                    >
-                      {Object.entries(ACTION_TYPE_LABELS).map(([k, v]) => (
-                        <option key={k} value={k}>{v}</option>
-                      ))}
-                    </select>
+                      onChange={(v) => updateAction(i, 'type', v)}
+                      variant="plain"
+                      className="font-medium"
+                      ariaLabel="修改动作"
+                      options={Object.entries(ACTION_TYPE_LABELS).map(([k, v]) => ({ value: k, label: v }))}
+                    />
                   </div>
                   <div className="flex items-center gap-2">
                     {showOperateField(action.type) && (
-                      <select
+                      <Select
                         value={action.operate}
-                        onChange={(e) => updateAction(i, 'operate', e.target.value)}
-                        className="text-xs px-2 py-0.5 border border-gray-200 dark:border-slate-600 rounded bg-white dark:bg-slate-800 text-gray-600 dark:text-slate-400 focus:outline-none focus:border-primary-400"
-                      >
-                        {getAvailableOperates(action.type).map(k => (
-                          <option key={k} value={k}>{OPERATE_TYPE_LABELS[k]}</option>
-                        ))}
-                      </select>
+                        onChange={(v) => updateAction(i, 'operate', v)}
+                        className="text-xs"
+                        ariaLabel="操作方式"
+                        options={getAvailableOperates(action.type).map(k => ({ value: k, label: OPERATE_TYPE_LABELS[k] }))}
+                      />
                     )}
                     {actions.length > 1 && (
-                      <button onClick={() => removeAction(i)} className="text-gray-300 hover:text-red-400 text-xs">
-                        ✕
+                      <button onClick={() => removeAction(i)} className="btn-ghost p-0.5" aria-label="删除动作" title="删除动作">
+                        <Icon name="x" size={14} />
                       </button>
                     )}
                   </div>
@@ -522,33 +544,26 @@ export default function RuleEditor({ rule, groups, onSave, onCancel, prefill }: 
                   )}
                   {showValueField(action.type) && (
                     <div>
-                      {(action.type === 'modifyResponseBody' || action.type === 'modifyRequestBody') && action.operate === 'set' && (
-                        <div className="flex justify-end gap-2 mb-1">
-                          <button
-                            type="button"
-                            onClick={() => formatActionValue(i)}
-                            className="text-xs text-primary-500 hover:text-primary-600 font-medium"
-                            title="格式化 JSON（缩进 2 空格）；能自动修复常见错误：多余逗号、单引号、缺引号、注释、缺括号、中文标点等"
-                          >
-                            格式化 JSON
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => minifyActionValue(i)}
-                            className="text-xs text-gray-400 hover:text-gray-600 dark:hover:text-slate-300 font-medium"
-                            title="压缩 JSON：去掉所有空白压成一行（先尝试修复再压缩）"
-                          >
-                            压缩
-                          </button>
-                        </div>
+                      {(action.type === 'modifyResponseBody' || action.type === 'modifyRequestBody') ? (
+                        <BodyValueField
+                          value={action.value}
+                          onChange={(v) => { updateAction(i, 'value', v); clearError(`action_${i}_value`); }}
+                          placeholder={getValuePlaceholder(action)}
+                          rows={5}
+                          hasError={!!errors[`action_${i}_value`]}
+                          showFormat={action.operate === 'set'}
+                          onFormat={() => formatActionValue(i)}
+                          onMinify={() => minifyActionValue(i)}
+                        />
+                      ) : (
+                        <textarea
+                          placeholder={getValuePlaceholder(action)}
+                          value={action.value}
+                          onChange={(e) => { updateAction(i, 'value', e.target.value); clearError(`action_${i}_value`); }}
+                          rows={action.type === 'injectScript' ? 6 : (action.type.includes('Header') || action.type === 'modifyRequestUrl') ? 1 : 2}
+                          className={`form-textarea text-xs w-full ${errors[`action_${i}_value`] ? 'border-red-400 focus:border-red-400 focus:ring-red-100' : ''}`}
+                        />
                       )}
-                      <textarea
-                        placeholder={getValuePlaceholder(action)}
-                        value={action.value}
-                        onChange={(e) => { updateAction(i, 'value', e.target.value); clearError(`action_${i}_value`); }}
-                        rows={action.type === 'injectScript' ? 6 : action.type.includes('Body') ? 5 : (action.type.includes('Header') || action.type === 'modifyRequestUrl') ? 1 : 2}
-                        className={`form-textarea text-xs w-full ${errors[`action_${i}_value`] ? 'border-red-400 focus:border-red-400 focus:ring-red-100' : ''}`}
-                      />
                       {(() => {
                         const err = errors[`action_${i}_value`];
                         if (err) return <p className="text-xs text-red-500 mt-1">{err}</p>;

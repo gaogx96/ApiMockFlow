@@ -1,4 +1,4 @@
-import { ApiRequest } from './api-types';
+import { ApiRequest, MultipartPart } from './api-types';
 
 export type ImportFormat = 'curl' | 'httpie' | 'openapi' | 'unknown';
 
@@ -20,11 +20,19 @@ function tokenize(s: string): string[] {
   while (i < s.length) {
     while (i < s.length && /\s/.test(s[i])) i++;
     if (i >= s.length) break;
-    if (s[i] === "'" || s[i] === '"') {
-      const quote = s[i]; i++;
+    const ansi = s[i] === '$' && s[i + 1] === "'";
+    if (ansi || s[i] === "'" || s[i] === '"') {
+      const quote = ansi ? "'" : s[i]; i += ansi ? 2 : 1;
       let t = '';
       while (i < s.length && s[i] !== quote) {
-        if (s[i] === '\\' && i + 1 < s.length && s[i + 1] === quote) { t += quote; i += 2; }
+        if (s[i] === '\\' && i + 1 < s.length) {
+          const next = s[i + 1];
+          if (ansi && next === 'r') { t += '\r'; i += 2; }
+          else if (ansi && next === 'n') { t += '\n'; i += 2; }
+          else if (ansi && next === 't') { t += '\t'; i += 2; }
+          else if (next === quote || next === '\\') { t += next; i += 2; }
+          else { t += next; i += 2; }
+        }
         else { t += s[i]; i++; }
       }
       i++; // skip closing quote
@@ -51,6 +59,7 @@ export function parseCurl(input: string): ApiRequest {
   s = s.replace(/^curl\s+/i, '');
 
   const tokens = tokenize(s);
+  const formParts: string[] = [];
 
   for (let i = 0; i < tokens.length; i++) {
     const t = tokens[i];
@@ -67,11 +76,19 @@ export function parseCurl(input: string): ApiRequest {
       const sepIdx = hv.indexOf(':');
       if (sepIdx > 0) {
         result.headers[hv.slice(0, sepIdx).trim()] = hv.slice(sepIdx + 1).trim();
+      } else if (hv.endsWith(';')) {
+        result.headers[hv.slice(0, -1).trim()] = '';
       }
       continue;
     }
 
     // Body: -d / --data / --data-raw / --data-binary
+    if ((t === '-F' || t === '--form' || t === '--form-string') && i + 1 < tokens.length) {
+      formParts.push(tokens[++i]);
+      result.bodyType = 'multipart';
+      if (!result.method || result.method === 'GET') result.method = 'POST';
+      continue;
+    }
     // Also handle compact form: -dfoo=bar (without space)
     if ((t === '-d' || t === '--data' || t === '--data-raw' || t === '--data-binary') && i + 1 < tokens.length) {
       result.body = tokens[++i];
@@ -133,6 +150,25 @@ export function parseCurl(input: string): ApiRequest {
     }
   }
 
+  if (formParts.length > 0) {
+    const unsupported: string[] = [];
+    result.body = JSON.stringify(formParts.map(part => {
+      const idx = part.indexOf('=');
+      const name = idx >= 0 ? part.slice(0, idx) : part;
+      const value = idx >= 0 ? part.slice(idx + 1) : '';
+      if (value.startsWith('@')) unsupported.push(`文件字段 ${name}`);
+      return { name, value };
+    }));
+    if (unsupported.length) result.unsupported = [`暂不支持导入 ${unsupported.join('、')}；请在 API Tester 中手动补充文件后发送。`];
+  }
+
+  const contentType = Object.entries(result.headers).find(([k]) => k.toLowerCase() === 'content-type')?.[1] || '';
+  if (/multipart\/form-data/i.test(contentType) && result.body) {
+    const parts = parseMultipartBody(result.body, contentType);
+    if (parts.length) result.body = JSON.stringify(parts);
+    result.bodyType = 'multipart';
+  }
+
   // If no URL found by token scan, try regex on original input
   if (!result.url) {
     const m = s.match(/['"]?(https?:\/\/[^\s'"]+)['"]?/i);
@@ -143,6 +179,23 @@ export function parseCurl(input: string): ApiRequest {
   result.url = (result.url || '').replace(/^['"]|['"]$/g, '');
 
   return result;
+}
+
+export function parseMultipartBody(body: string, contentType = ''): MultipartPart[] {
+  const match = contentType.match(/boundary\s*=\s*(?:"([^"]+)"|([^;\s]+))/i);
+  const boundary = match?.[1] || match?.[2];
+  if (!boundary || !body) return [];
+  const delimiter = `--${boundary}`;
+  return body.split(delimiter).slice(1).map(section => section.replace(/^\r?\n/, '')).filter(section => !/^--/.test(section.trim())).map(section => {
+    const split = section.split(/\r?\n\r?\n/);
+    const headerText = split.shift() || '';
+    const value = split.join('\r\n\r\n').replace(/\r?\n$/, '');
+    const disposition = headerText.match(/Content-Disposition:\s*form-data;([^\r\n]+)/i)?.[1] || '';
+    const name = disposition.match(/(?:^|;)\s*name="([^"]*)"/i)?.[1] || disposition.match(/(?:^|;)\s*name=([^;\s]+)/i)?.[1] || '';
+    const fileName = disposition.match(/filename="([^"]*)"/i)?.[1];
+    const ct = headerText.match(/Content-Type:\s*([^\r\n]+)/i)?.[1]?.trim();
+    return { name, value, ...(fileName ? { fileName } : {}), ...(ct ? { contentType: ct } : {}) };
+  }).filter(part => part.name);
 }
 
 export function parseHttpie(input: string): ApiRequest {

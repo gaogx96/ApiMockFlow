@@ -9,8 +9,16 @@ if (window.__APII_INIT) { /* already injected */ } else { window.__APII_INIT = t
   var RULES = [];
   var GROUPS = [];
   var GLOBAL_ENABLED = true;
+  var OBSERVE_ENABLED = false;
+  var OBSERVE_TYPES = { fetch: true, xmlhttprequest: true };
+  function absoluteUrl(value) {
+    try { return new URL(value, location.href).href; } catch (_) { return value || ''; }
+  }
   var ACTIVE = false;
   var _reqCount = 0;
+  // Keep enough response content for creating a usable Mock rule from logs.
+  // The response is still capped to avoid unbounded page/storage growth.
+  var LOG_BODY_LIMIT = 10000000;
   var _rcTimer = null;
 
   // === Optimized matching indexes (built on sync) ===
@@ -31,6 +39,40 @@ if (window.__APII_INIT) { /* already injected */ } else { window.__APII_INIT = t
     return false;
   }
   function parseHdr(raw) { var r = {}; raw.trim().split(/[\r\n]+/).forEach(function (line) { var idx = line.indexOf(': '); if (idx > 0) r[line.slice(0, idx)] = line.slice(idx + 2); }); return r; }
+  function deleteHeaderCI(headers, name) { for (var k in headers) { if (k.toLowerCase() === name) delete headers[k]; } }
+  function readXHRText(xhr) {
+    try {
+      if (!xhr.responseType || xhr.responseType === 'text') return xhr.responseText || '';
+      if (xhr.responseType === 'json') return xhr.response == null ? '' : JSON.stringify(xhr.response);
+    } catch (_) {}
+    return '';
+  }
+  function defineOn(o, prop, val) { try { Object.defineProperty(o, prop, { value: val, writable: true, configurable: true }); } catch (_) {} }
+  function setXHRRespHeaders(self, headers) {
+    self.getResponseHeader = function (n) { for (var k in headers) { if (k.toLowerCase() === n.toLowerCase()) return headers[k]; } return null; };
+    self.getAllResponseHeaders = function () { return Object.keys(headers).map(function (k) { return k + ': ' + headers[k]; }).join('\r\n'); };
+  }
+  // 把（可能改写过的）响应回填到页面原始 XHR self，尊重 responseType：
+  //  text/''  → responseText 与 response 都设为文本
+  //  json     → response 设为 JSON.parse(文本)（页面读 xhr.response 期望的是对象，直接给字符串会崩）
+  //  blob/arraybuffer/document 等 → 文本规则无法有意义地改写二进制体；
+  //    传入 binaryFallback（代理分支的 px.response）则原样透传，否则不动 self.response（保留原生响应）。
+  function applyModRespToXHR(self, rmod, hasBinaryFallback, binaryFallback) {
+    defineOn(self, 'status', rmod.status);
+    defineOn(self, 'statusText', rmod.statusText);
+    setXHRRespHeaders(self, rmod.headers);
+    var rt = self.responseType;
+    if (!rt || rt === 'text') {
+      defineOn(self, 'responseText', rmod.body);
+      defineOn(self, 'response', rmod.body);
+    } else if (rt === 'json') {
+      var obj = null;
+      try { obj = rmod.body === '' || rmod.body == null ? null : JSON.parse(rmod.body); } catch (_) { obj = null; }
+      defineOn(self, 'response', obj);
+    } else if (hasBinaryFallback) {
+      defineOn(self, 'response', binaryFallback);
+    }
+  }
   var REQ = ['modifyRequestUrl','modifyRequestHeader','modifyRequestBody','redirect','cancel','delay','injectScript'];
   var RESP = ['modifyResponseHeader','modifyResponseBody','modifyStatusCode'];
 
@@ -318,7 +360,16 @@ if (window.__APII_INIT) { /* already injected */ } else { window.__APII_INIT = t
     if (body instanceof ArrayBuffer || body instanceof Uint8Array) {
       try { return new TextDecoder().decode(body); } catch (_) { return undefined; }
     }
-    // FormData, Blob, ReadableStream — cannot safely stringify, skip body modification
+    if (typeof FormData !== 'undefined' && body instanceof FormData) {
+      var parts = [];
+      try { body.forEach(function (value, key) {
+        if (typeof File !== 'undefined' && value instanceof File) {
+          parts.push(key + '=[File: ' + (value.name || 'unnamed') + ', ' + (value.type || 'application/octet-stream') + ', ' + value.size + ' bytes]');
+        } else parts.push(key + '=' + String(value));
+      }); } catch (_) {}
+      return parts.join('\n');
+    }
+    // Blob, ReadableStream — cannot safely stringify, skip body modification
     return undefined;
   }
 
@@ -383,7 +434,7 @@ if (window.__APII_INIT) { /* already injected */ } else { window.__APII_INIT = t
           break;
       }
     }
-    if (bodyChanged) { delete h['content-length']; }
+    if (bodyChanged) { deleteHeaderCI(h, 'content-length'); }
     // 诊断：请求体被改写、带签名头、且未用 injectScript 补偿 → 服务端签名校验大概率失败（401→跳登录）
     var warnings = [];
     if (bodyChanged && !hadInject) {
@@ -432,10 +483,11 @@ if (window.__APII_INIT) { /* already injected */ } else { window.__APII_INIT = t
       }
     }
     if (bodyChanged) {
-      delete h['content-length'];
-      delete h['content-encoding'];
-      var ct = h['content-type'];
-      if (ct && ct.indexOf('charset') === -1) h['content-type'] = ct + '; charset=utf-8';
+      deleteHeaderCI(h, 'content-length');
+      deleteHeaderCI(h, 'content-encoding');
+      var ctKey = Object.keys(h).find(function (k) { return k.toLowerCase() === 'content-type'; });
+      var ct = ctKey ? h[ctKey] : undefined;
+      if (ct && ct.indexOf('charset') === -1) h[ctKey] = ct + '; charset=utf-8';
     }
     return { status: s, statusText: st, headers: h, body: b };
   }
@@ -455,6 +507,7 @@ if (window.__APII_INIT) { /* already injected */ } else { window.__APII_INIT = t
       originalRequest: ctx.origReq, modifiedRequest: ctx.modReq,
       originalResponse: origResp || undefined, modifiedResponse: modResp || undefined,
       cancelled: false, delayed: ctx.delayMs > 0, delayMs: ctx.delayMs,
+      kind: ctx.ruleIds.length ? 'rule-applied' : 'observed', resourceType: ctx.resourceType,
       warnings: (ctx.warnings && ctx.warnings.length) ? ctx.warnings : undefined
     };
   }
@@ -473,7 +526,7 @@ if (window.__APII_INIT) { /* already injected */ } else { window.__APII_INIT = t
   async function handleFetchResp(resp, respA, ctx) {
     // opaque / error / 无状态响应：既读不到 body 也改不了 header，原样返回
     if (resp.type === 'opaque' || resp.type === 'opaqueredirect' || resp.type === 'error' || resp.status === 0) {
-      postLog(respFullLog(ctx, undefined, { status: 0, statusText: '跨域/opaque 响应，无法读取或修改', headers: {}, body: '' }));
+      postLog(respFullLog(ctx, undefined, respA.length ? { status: 0, statusText: '跨域/opaque 响应，无法读取或修改', headers: {}, body: '' } : undefined));
       return resp;
     }
 
@@ -485,19 +538,35 @@ if (window.__APII_INIT) { /* already injected */ } else { window.__APII_INIT = t
     var hasReplace = bodyActs.some(function (a) { return a.operate === 'replace'; });
     var hasSet = bodyActs.some(function (a) { return a.operate === 'set'; });
 
+    // 观察日志只读取 Response 的副本。此前它落入下面的改写路径，即使没有
+    // 响应规则也会为重建 Response 删除 content-length/content-encoding，造成假差异。
+    if (respA.length === 0) {
+      if (!isTextResponse(ct)) {
+        postLog(respFullLog(ctx, { status: resp.status, statusText: resp.statusText, headers: srcHdr, body: isEventStream ? '(SSE，未读取)' : '(二进制，未读取)' }, undefined));
+        return resp;
+      }
+      try {
+        var observedBody = await resp.clone().text();
+        postLog(respFullLog(ctx, { status: resp.status, statusText: resp.statusText, headers: srcHdr, body: trunc(observedBody, LOG_BODY_LIMIT) }, undefined));
+      } catch (_) {
+        postLog(respFullLog(ctx, { status: resp.status, statusText: resp.statusText, headers: srcHdr, body: '' }, undefined));
+      }
+      return resp;
+    }
+
     // ---- 文本响应：缓冲后应用全部动作（replace / set / 改头改状态），保留完整日志与 diff ----
     if (isTextResponse(ct)) {
       try {
         var rb = await resp.text();
         var rmod = applyResp(resp.status, resp.statusText, srcHdr, rb, respA);
         // 回填的是已解码文本 → 原 content-encoding/length 不再成立，删除以免消费方按原编码/长度误判
-        delete rmod.headers['content-encoding'];
-        delete rmod.headers['content-length'];
+        deleteHeaderCI(rmod.headers, 'content-encoding');
+        deleteHeaderCI(rmod.headers, 'content-length');
         postLog(respFullLog(ctx,
-          { status: resp.status, statusText: resp.statusText, headers: srcHdr, body: trunc(rb, 2000) },
-          { status: rmod.status, statusText: rmod.statusText, headers: rmod.headers, body: trunc(rmod.body, 2000) }));
+          { status: resp.status, statusText: resp.statusText, headers: srcHdr, body: trunc(rb, LOG_BODY_LIMIT) },
+          { status: rmod.status, statusText: rmod.statusText, headers: rmod.headers, body: trunc(rmod.body, LOG_BODY_LIMIT) }));
         var finalBody = rmod.body;
-        if (finalBody && finalBody.length > 2000000) { finalBody = finalBody.slice(0, 2000000); rmod.headers['content-type'] = 'text/plain; charset=utf-8'; }
+        if (finalBody && finalBody.length > LOG_BODY_LIMIT) { finalBody = finalBody.slice(0, LOG_BODY_LIMIT); rmod.headers['content-type'] = 'text/plain; charset=utf-8'; }
         return buildResp(isNullBodyStatus(rmod.status) ? null : finalBody, rmod, resp);
       } catch (readErr) {
         console.warn('[ApiMockFlow] 响应体读取失败，无法应用响应修改:', readErr && readErr.message);
@@ -526,10 +595,10 @@ if (window.__APII_INIT) { /* already injected */ } else { window.__APII_INIT = t
     if (hasSet) {
       // set 用给定值整体替换 body（用户明确要替换），无需读取原始响应体
       var fb = rmod2.body;
-      if (fb && fb.length > 2000000) { fb = fb.slice(0, 2000000); rmod2.headers['content-type'] = 'text/plain; charset=utf-8'; }
+      if (fb && fb.length > LOG_BODY_LIMIT) { fb = fb.slice(0, LOG_BODY_LIMIT); rmod2.headers['content-type'] = 'text/plain; charset=utf-8'; }
       postLog(respFullLog(ctx,
         { status: resp.status, statusText: resp.statusText, headers: srcHdr, body: '(' + kind + '，未缓冲)' },
-        { status: rmod2.status, statusText: rmod2.statusText, headers: rmod2.headers, body: trunc(rmod2.body, 2000) }));
+        { status: rmod2.status, statusText: rmod2.statusText, headers: rmod2.headers, body: trunc(rmod2.body, LOG_BODY_LIMIT) }));
       return buildResp(isNullBodyStatus(rmod2.status) ? null : fb, rmod2, resp);
     }
 
@@ -538,8 +607,8 @@ if (window.__APII_INIT) { /* already injected */ } else { window.__APII_INIT = t
       console.warn('[ApiMockFlow] ' + kind + '响应无法做正则替换，已跳过响应体改写，仅应用头/状态并透传');
     }
     // 透传的是 fetch 已解码的 body 流，原 content-encoding/length 不再匹配，删掉以免消费方误判
-    delete rmod2.headers['content-encoding'];
-    delete rmod2.headers['content-length'];
+    deleteHeaderCI(rmod2.headers, 'content-encoding');
+    deleteHeaderCI(rmod2.headers, 'content-length');
     postLog(respFullLog(ctx,
       { status: resp.status, statusText: resp.statusText, headers: srcHdr, body: '(' + kind + '流式透传)' },
       { status: rmod2.status, statusText: rmod2.statusText, headers: rmod2.headers, body: '(流式透传)' }));
@@ -550,10 +619,11 @@ if (window.__APII_INIT) { /* already injected */ } else { window.__APII_INIT = t
   // === Intercepted fetch ===
   async function interceptedFetch(input, init) {
     _reqCount++;
-    var url = typeof input === 'string' ? input : (input instanceof URL ? input.href : (input && input.url) || '');
+    var url = absoluteUrl(typeof input === 'string' ? input : (input instanceof URL ? input.href : (input && input.url) || ''));
     var method = (init && init.method) || (input && input.method) || 'GET';
     var rules = getMatchingRules(url, method, 'fetch');
-    if (rules.length === 0) return NATIVE_FETCH(input, init);
+    var observing = GLOBAL_ENABLED && OBSERVE_ENABLED && OBSERVE_TYPES.fetch;
+    if (rules.length === 0 && !observing) return NATIVE_FETCH(input, init);
 
     var allA = []; for (var i = 0; i < rules.length; i++) allA = allA.concat(rules[i].actions);
     var reqA = allA.filter(function (a) { return REQ.indexOf(a.type) >= 0; });
@@ -565,22 +635,40 @@ if (window.__APII_INIT) { /* already injected */ } else { window.__APII_INIT = t
     var origH = init && init.headers
       ? hdrRec(init.headers instanceof Headers ? init.headers : new Headers(init.headers))
       : (reqObj ? hdrRec(reqObj.headers) : {});
-    var origB = extractBody(init && init.body);
+    var actualBody = init && init.body;
+    var isFormDataBody = typeof FormData !== 'undefined' && actualBody instanceof FormData;
+    var isMultipartBody = isFormDataBody || !!(reqObj && /multipart\/form-data/i.test(reqObj.headers.get('content-type') || ''));
+    var origB = extractBody(actualBody);
+    if (isFormDataBody) {
+      try { origB = await new Request(url, { method: method, headers: origH, body: actualBody }).text(); } catch (_) {}
+    }
     if (origB === undefined && reqObj && method !== 'GET' && method !== 'HEAD' &&
-        reqA.some(function (a) { return a.type === 'modifyRequestBody'; })) {
-      // 仅当确有请求体改写动作时才克隆读取 Request body（避免为日志白白缓冲大上传体）
-      try { origB = await reqObj.clone().text(); } catch (_) {}
+        (observing || reqA.some(function (a) { return a.type === 'modifyRequestBody'; }))) {
+      // Request 对象的 FormData 不在 init.body 中；观察模式下也读取其副本用于日志，
+      // 实际发送仍使用原 Request，避免消费请求流或破坏 multipart boundary。
+      try {
+        var reqClone = reqObj.clone();
+        // 保留浏览器实际序列化后的 multipart 文本（包含 boundary），
+        // 这样日志打开 API Tester 时 Header 与 Body 能保持一致。
+        origB = await reqClone.text();
+        if (!origB && (reqClone.headers.get('content-type') || '').toLowerCase().indexOf('multipart/form-data') >= 0 && reqClone.formData) {
+          origB = extractBody(await reqClone.formData());
+        }
+      } catch (_) {}
     }
 
     var origUrl = url;
-    var origReq = { headers: origH, body: trunc(origB, 2000) };
-    var rm = applyReq(url, origH, origB, reqA);
-    var modReq = { url: rm.url, headers: rm.headers, body: trunc(rm.body, 2000) };
+    var effectiveReqA = isMultipartBody ? reqA.filter(function (a) { return a.type !== 'modifyRequestBody'; }) : reqA;
+    var origReq = { headers: origH, body: trunc(origB, LOG_BODY_LIMIT), bodyType: isMultipartBody ? 'multipart' : undefined };
+    var rm = applyReq(url, origH, origB, effectiveReqA);
+    if (isMultipartBody && effectiveReqA.length !== reqA.length) rm.warnings.push('Multipart/FormData 请求暂不支持“修改请求体”规则；该动作已跳过，请改用 API Tester 手动重放。');
+    var modReq = { url: rm.url, headers: rm.headers, body: trunc(rm.body, LOG_BODY_LIMIT), bodyType: isMultipartBody ? 'multipart' : undefined };
     var ctx = {
       origUrl: origUrl, method: method,
       ruleIds: rules.map(function (r) { return r.id; }),
       ruleNames: rules.map(function (r) { return r.name; }),
-      origReq: origReq, modReq: modReq, delayMs: rm.delayMs, warnings: rm.warnings
+      origReq: origReq, modReq: modReq, delayMs: rm.delayMs, warnings: rm.warnings,
+      resourceType: 'fetch'
     };
     if (rm.warnings && rm.warnings.length) {
       for (var _wi = 0; _wi < rm.warnings.length; _wi++) console.warn('[ApiMockFlow] ' + rm.warnings[_wi]);
@@ -603,17 +691,17 @@ if (window.__APII_INIT) { /* already injected */ } else { window.__APII_INIT = t
 
     // 请求阶段无任何修改（仅响应规则）→ 原样透传，避免重建 init 冲掉 Request 自带的 headers/body
     var fetchInput = input, fetchInit = init;
-    if (reqA.length > 0) {
+    if (effectiveReqA.length > 0) {
       var ni = init ? Object.assign({}, init) : {};
       if (rm.url !== url) fetchInput = rm.url;
       ni.headers = rm.headers;
-      if (rm.body !== undefined) ni.body = rm.body;
+      if (rm.body !== undefined && !isFormDataBody) ni.body = rm.body;
       fetchInit = ni;
     }
 
     try {
       var resp = await NATIVE_FETCH(fetchInput, fetchInit);
-      if (respA.length > 0) return await handleFetchResp(resp, respA, ctx);
+      if (respA.length > 0 || observing) return await handleFetchResp(resp, respA, ctx);
       postLog(respFullLog(ctx, undefined, undefined));
       return resp;
     } catch (fetchErr) {
@@ -638,21 +726,25 @@ if (window.__APII_INIT) { /* already injected */ } else { window.__APII_INIT = t
       this._xb = extractBody(body);
       if (!self._xu) { return _XHR_send.call(self, body); }
       _reqCount++;
-      var ou = self._xu, om = self._xm, orh = {}; for (var k in self._xrh) orh[k] = self._xrh[k]; var ob = self._xb;
+      var ou = absoluteUrl(self._xu), om = self._xm, orh = {}; for (var k in self._xrh) orh[k] = self._xrh[k]; var ob = self._xb;
       var rules = getMatchingRules(ou, om, 'xmlhttprequest');
-      if (rules.length === 0) { return _XHR_send.call(self, body); }
+      var observing = GLOBAL_ENABLED && OBSERVE_ENABLED && OBSERVE_TYPES.xmlhttprequest;
+      if (rules.length === 0 && !observing) { return _XHR_send.call(self, body); }
 
       var allA = []; for (var i = 0; i < rules.length; i++) allA = allA.concat(rules[i].actions);
       var reqA = allA.filter(function (a) { return REQ.indexOf(a.type) >= 0; });
       var respA = allA.filter(function (a) { return RESP.indexOf(a.type) >= 0; });
-      var xhrOrigReq = { headers: orh, body: trunc(ob, 2000) };
-      var rm = applyReq(ou, orh, ob, reqA);
-      var xhrModReq = { url: rm.url, headers: rm.headers, body: trunc(rm.body, 2000) };
+      var isFormDataBody = typeof FormData !== 'undefined' && body instanceof FormData;
+      var effectiveReqA = isFormDataBody ? reqA.filter(function (a) { return a.type !== 'modifyRequestBody'; }) : reqA;
+      var xhrOrigReq = { headers: orh, body: trunc(ob, LOG_BODY_LIMIT), bodyType: isFormDataBody ? 'multipart' : undefined };
+      var rm = applyReq(ou, orh, ob, effectiveReqA);
+      if (isFormDataBody && effectiveReqA.length !== reqA.length) rm.warnings.push('Multipart/FormData 请求暂不支持“修改请求体”规则；该动作已跳过，请改用 API Tester 手动重放。');
+      var xhrModReq = { url: rm.url, headers: rm.headers, body: trunc(rm.body, LOG_BODY_LIMIT), bodyType: isFormDataBody ? 'multipart' : undefined };
       var xhrRuleIds = rules.map(function(r){return r.id;});
       var xhrRuleNames = rules.map(function(r){return r.name;});
 
       function xhrLog(origResp, modResp, cancelled) {
-        postLog({ id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6), timestamp: Date.now(), url: ou, method: om, ruleIds: xhrRuleIds, ruleNames: xhrRuleNames, originalRequest: xhrOrigReq, modifiedRequest: xhrModReq, originalResponse: origResp || undefined, modifiedResponse: modResp || undefined, cancelled: !!cancelled, delayed: rm.delayMs > 0, delayMs: rm.delayMs, warnings: (rm.warnings && rm.warnings.length) ? rm.warnings : undefined });
+        postLog({ id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6), timestamp: Date.now(), url: ou, method: om, ruleIds: xhrRuleIds, ruleNames: xhrRuleNames, originalRequest: xhrOrigReq, modifiedRequest: xhrModReq, originalResponse: origResp || undefined, modifiedResponse: modResp || undefined, cancelled: !!cancelled, delayed: rm.delayMs > 0, delayMs: rm.delayMs, kind: xhrRuleIds.length ? (cancelled ? 'rule-cancelled' : 'rule-applied') : 'observed', resourceType: 'xmlhttprequest', warnings: (rm.warnings && rm.warnings.length) ? rm.warnings : undefined });
       }
       if (rm.warnings && rm.warnings.length) {
         for (var _xwi = 0; _xwi < rm.warnings.length; _xwi++) console.warn('[ApiMockFlow] ' + rm.warnings[_xwi]);
@@ -672,8 +764,10 @@ if (window.__APII_INIT) { /* already injected */ } else { window.__APII_INIT = t
 
         if (rm.url !== ou || hdrChanged) {
           // 需要改 URL，或增/删/改请求头 → 用全新代理 XHR，请求头只干净地设一次
+          // 代理 XHR 必须用原生方法收发，否则它命中的是被 patch 过的原型 → send 会重新进入拦截器，
+          // 同一请求被再匹配、再在发送前记一条(不带响应)日志（表现为「一次调用两条：一条带响应一条不带」）。
           var px = new NATIVE_XHR();
-          try { px.open(om, rm.url, true); } catch (openErr) {
+          try { _XHR_open.call(px, om, rm.url, true); } catch (openErr) {
             // 打开失败（如非法 URL）→ 通知调用方网络错误
             self.dispatchEvent(new Event('error'));
             xhrLog(null, null, false);
@@ -684,7 +778,7 @@ if (window.__APII_INIT) { /* already injected */ } else { window.__APII_INIT = t
           try { if (self.timeout) px.timeout = self.timeout; } catch (_) {}
           try { if (self.responseType) px.responseType = self.responseType; } catch (_) {}
           var hk2 = Object.keys(rm.headers);
-          for (var i3 = 0; i3 < hk2.length; i3++) { try { px.setRequestHeader(hk2[i3], rm.headers[hk2[i3]]); } catch (_) {} }
+          for (var i3 = 0; i3 < hk2.length; i3++) { try { _XHR_setRH.call(px, hk2[i3], rm.headers[hk2[i3]]); } catch (_) {} }
 
           // Timeout handler —— 置 _xrm 抢占，避免超时后 onreadystatechange(4) 再派发一个 status=0 的假 load
           px.ontimeout = function() {
@@ -709,14 +803,29 @@ if (window.__APII_INIT) { /* already injected */ } else { window.__APII_INIT = t
           px.onreadystatechange = function () {
             if (px.readyState === 4 && !self._xrm) {
               self._xrm = true;
-              var rb = ''; try { rb = px.responseText || ''; } catch (_) { rb = ''; } // responseType 非文本时读 responseText 会抛
+              var rb = readXHRText(px);
               var rh = parseHdr(px.getAllResponseHeaders());
-              var xhrOrigResp = { status: px.status, statusText: px.statusText, headers: rh, body: trunc(rb, 2000) };
+              var xhrOrigResp = { status: px.status, statusText: px.statusText, headers: rh, body: trunc(rb, LOG_BODY_LIMIT) };
               if (respA.length > 0) {
                 var rmod = applyResp(px.status, px.statusText, rh, rb, respA);
-                try{Object.defineProperty(self,'status',{value:rmod.status,writable:true,configurable:true});Object.defineProperty(self,'statusText',{value:rmod.statusText,writable:true,configurable:true});Object.defineProperty(self,'responseText',{value:rmod.body,writable:true,configurable:true});Object.defineProperty(self,'response',{value:rmod.body,writable:true,configurable:true});self.getResponseHeader=function(n){for(var k2 in rmod.headers){if(k2.toLowerCase()===n.toLowerCase())return rmod.headers[k2];}return null;};self.getAllResponseHeaders=function(){return Object.keys(rmod.headers).map(function(k2){return k2+': '+rmod.headers[k2];}).join('\r\n');};}catch(_){}
-                xhrLog(xhrOrigResp, { status: rmod.status, statusText: rmod.statusText, headers: rmod.headers, body: trunc(rmod.body, 2000) });
+                // self 从未真正发送，二进制类型用代理 px 的原生 response 兜底
+                applyModRespToXHR(self, rmod, true, px.response);
+                xhrLog(xhrOrigResp, { status: rmod.status, statusText: rmod.statusText, headers: rmod.headers, body: trunc(rmod.body, LOG_BODY_LIMIT) });
               } else {
+                // 仅改了请求（未改响应）：必须把代理 px 收到的真实响应回填到 self，
+                // 否则页面 load 时读 self.responseText/response 是空的 → 请求成功但页面拿不到数据。
+                try {
+                  var _hdrStr = px.getAllResponseHeaders();
+                  Object.defineProperty(self, 'status', { value: px.status, writable: true, configurable: true });
+                  Object.defineProperty(self, 'statusText', { value: px.statusText, writable: true, configurable: true });
+                  // response 按 responseType 原样透传（json/blob/arraybuffer 保持对象形态）；responseText 仅文本类型可读
+                  Object.defineProperty(self, 'response', { value: px.response, writable: true, configurable: true });
+                  if (!self.responseType || self.responseType === 'text') {
+                    Object.defineProperty(self, 'responseText', { value: px.responseText, writable: true, configurable: true });
+                  }
+                  self.getResponseHeader = function (n) { return px.getResponseHeader(n); };
+                  self.getAllResponseHeaders = function () { return _hdrStr; };
+                } catch (_) {}
                 xhrLog(xhrOrigResp, null);
               }
               try{Object.defineProperty(self,'readyState',{value:4,writable:true,configurable:true});}catch(_){}
@@ -727,7 +836,7 @@ if (window.__APII_INIT) { /* already injected */ } else { window.__APII_INIT = t
               // 不派发 error。此前多派发的 error 会让 axios/jQuery 把正常响应误判为网络错误。
             }
           };
-          try { px.send(rm.body !== undefined ? rm.body : body); } catch (sendErr) {
+          try { _XHR_send.call(px, rm.body !== undefined && !isFormDataBody ? rm.body : body); } catch (sendErr) {
             // 发送失败 → 通知调用方网络错误
             self.dispatchEvent(new Event('error'));
             xhrLog(null, null, false);
@@ -737,27 +846,34 @@ if (window.__APII_INIT) { /* already injected */ } else { window.__APII_INIT = t
 
         // 无 URL 变化、无请求头增删改（至多改了 body）→ 保留 self 上业务代码设好的原始头不动，
         // 只把（可能改写过的）body 发出去；在原生 XHR 上拦截响应
-        if (respA.length > 0) {
+        if (respA.length > 0 || observing) {
           self.addEventListener('readystatechange', function h() {
             if (self.readyState === 4 && !self._xrm) {
               self._xrm = true;
               self.removeEventListener('readystatechange', h);
               try {
-                var rb = self.responseText || '';
+                var rb = readXHRText(self);
                 var rh = parseHdr(oGAH.call(self));
                 var os = self.status, ot = self.statusText;
-                var xhrOrigResp2 = { status: os, statusText: ot, headers: rh, body: trunc(rb, 2000) };
-                var rmod = applyResp(os, ot, rh, rb, respA);
-                try{Object.defineProperty(self,'status',{value:rmod.status,writable:true,configurable:true});Object.defineProperty(self,'statusText',{value:rmod.statusText,writable:true,configurable:true});Object.defineProperty(self,'responseText',{value:rmod.body,writable:true,configurable:true});Object.defineProperty(self,'response',{value:rmod.body,writable:true,configurable:true});self.getResponseHeader=function(n){for(var k2 in rmod.headers){if(k2.toLowerCase()===n.toLowerCase())return rmod.headers[k2];}return null;};self.getAllResponseHeaders=function(){return Object.keys(rmod.headers).map(function(k2){return k2+': '+rmod.headers[k2];}).join('\r\n');};}catch(_){}
-                xhrLog(xhrOrigResp2, { status: rmod.status, statusText: rmod.statusText, headers: rmod.headers, body: trunc(rmod.body, 2000) });
+                var xhrOrigResp2 = { status: os, statusText: ot, headers: rh, body: trunc(rb, LOG_BODY_LIMIT) };
+                if (respA.length > 0) {
+                  var rmod = applyResp(os, ot, rh, rb, respA);
+                  // self 已原生发送：二进制类型不传兜底 → 保留原生 response，不被文本覆盖损坏
+                  applyModRespToXHR(self, rmod, false);
+                  xhrLog(xhrOrigResp2, { status: rmod.status, statusText: rmod.statusText, headers: rmod.headers, body: trunc(rmod.body, LOG_BODY_LIMIT) });
+                } else {
+                  xhrLog(xhrOrigResp2, null);
+                }
               } catch (readErr) {
                 console.warn('[ApiMockFlow] XHR 响应体读取失败:', readErr && readErr.message);
               }
             }
           });
         }
-        xhrLog(null, null);
-        return _XHR_send.call(self, rm.body !== undefined ? rm.body : body);
+        // 观察模式只在请求完成后记录一次；规则请求「无响应动作」时才保留发送前日志——
+        // 有响应动作(respA.length>0)时上面已挂 readystatechange 完成日志，再记发送前日志就成双条。
+        if (!observing && respA.length === 0) xhrLog(null, null);
+        return _XHR_send.call(self, rm.body !== undefined && !isFormDataBody ? rm.body : body);
       }
 
       if (rm.delayMs > 0) {
@@ -796,6 +912,9 @@ if (window.__APII_INIT) { /* already injected */ } else { window.__APII_INIT = t
     if (e.data.type === 'APII_SYNC') {
       GLOBAL_ENABLED = e.data.globalEnabled;
       RULES = e.data.rules || [];
+      OBSERVE_ENABLED = e.data.observeEnabled === true;
+      OBSERVE_TYPES = {};
+      (e.data.observeResourceTypes || ['fetch', 'xmlhttprequest']).forEach(function (t) { OBSERVE_TYPES[t] = true; });
       for (var i = 0; i < RULES.length; i++) {
         if (RULES[i].match && RULES[i].match.url) RULES[i].match.url = RULES[i].match.url.trim();
       }

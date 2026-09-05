@@ -49,6 +49,9 @@ function storageGet<T>(key: string, def: T): Promise<T> {
 function storageSet(key: string, val: any): Promise<void> {
   return new Promise((r) => chrome.storage.local.set({ [key]: val }, r));
 }
+function storageSetMany(values: Record<string, unknown>): Promise<void> {
+  return new Promise((r) => chrome.storage.local.set(values, r));
+}
 
 // ===== Auth header capture (方案1: 抓真实请求头) =====
 // 监听页面实际发出的请求，按语义模式提取认证类请求头（不针对单一键名），
@@ -411,6 +414,58 @@ chrome.windows.onRemoved.addListener((closedId) => {
 });
 
 // ===== Message handler =====
+let logWriteQueue: Promise<unknown> = Promise.resolve();
+let historyWriteQueue: Promise<unknown> = Promise.resolve();
+let observeWriteQueue: Promise<unknown> = Promise.resolve();
+const MAX_INTERCEPT_LOG_BYTES = 100 * 1024 * 1024;
+
+const WEB_REQUEST_TYPE_MAP: Record<string, string> = {
+  main_frame: 'document', sub_frame: 'document', script: 'script', stylesheet: 'stylesheet',
+  image: 'image', font: 'font', media: 'media', other: 'other', ping: 'other',
+  websocket: 'other', webbundle: 'other', csp_report: 'other',
+};
+
+// Fetch/XHR are logged by the page interceptor with body details. Other resource types
+// can only be observed from webRequest, so keep their logs lightweight and non-duplicated.
+chrome.webRequest.onCompleted.addListener((details) => {
+  const resourceType = WEB_REQUEST_TYPE_MAP[details.type];
+  if (!resourceType || !/^https?:\/\//i.test(details.url)) return;
+  Promise.all([
+    storageGet<boolean>('globalEnabled', true),
+    storageGet<boolean>('observeEnabled', false),
+    storageGet<string[]>('observeResourceTypes', ['fetch', 'xmlhttprequest']),
+  ]).then(([globalEnabled, observeEnabled, observeTypes]) => {
+    if (!globalEnabled || !observeEnabled || !observeTypes.includes(resourceType)) return;
+    const responseHeaders: Record<string, string> = {};
+    for (const header of details.responseHeaders || []) {
+      if (header.name) responseHeaders[header.name] = header.value || '';
+    }
+    const log = {
+      id: `wr-${details.requestId}-${Date.now()}`,
+      timestamp: Date.now(), url: details.url, method: details.method,
+      ruleIds: [], ruleNames: [],
+      originalRequest: { headers: {}, body: undefined },
+      modifiedRequest: { url: details.url, headers: {}, body: undefined },
+      originalResponse: { status: details.statusCode, statusText: details.statusLine || '', headers: responseHeaders, body: '' },
+      modifiedResponse: undefined,
+      cancelled: false, delayed: false, delayMs: 0,
+      kind: 'observed', resourceType,
+    };
+    logWriteQueue = logWriteQueue.then(async () => {
+      const logs = await storageGet<any[]>('interceptLog', []);
+      logs.unshift(log);
+      if (logs.length > 200) logs.length = 200;
+      let bytes = 0;
+      for (const item of logs) bytes += JSON.stringify(item).length * 2;
+      while (logs.length && bytes > MAX_INTERCEPT_LOG_BYTES) bytes -= JSON.stringify(logs.pop()).length * 2;
+      await storageSet('interceptLog', logs);
+    });
+  }).catch(() => {});
+// Do not restrict `types` here. Some Chrome versions reject an entire listener
+// registration when a newer webRequest type is unavailable, which silently left
+// only the page-level Fetch/XHR observer working.
+}, { urls: ['<all_urls>'] }, ['responseHeaders']);
+
 chrome.runtime.onMessage.addListener((msg: any, _sender: any, sendResponse: any) => {
   const t = msg.type;
 
@@ -432,13 +487,33 @@ chrome.runtime.onMessage.addListener((msg: any, _sender: any, sendResponse: any)
   if (t === 'GET_STATE') {
     Promise.all([
       storageGet('globalEnabled', true), storageGet('rules', []),
-      storageGet<RuleGroup[]>('groups', [])
-    ]).then(([ge, r, g]) => {
+      storageGet<RuleGroup[]>('groups', []), storageGet('observeEnabled', false),
+      storageGet<string[]>('observeResourceTypes', ['fetch', 'xmlhttprequest'])
+    ]).then(([ge, r, g, observeEnabled, observeResourceTypes]) => {
       if (g.length === 0) {
         g = [{ id: 'default', name: '默认分组', enabled: true, color: '#1677ff' }];
       }
-      sendResponse({ globalEnabled: ge, rules: r, groups: g });
+      sendResponse({ globalEnabled: ge, rules: r, groups: g, observeEnabled, observeResourceTypes });
     });
+    return true;
+  }
+
+  if (t === 'SET_OBSERVE') {
+    const p = msg.payload || {};
+    const enabled = p.enabled === true;
+    const allowedTypes = ['fetch', 'xmlhttprequest', 'document', 'script', 'stylesheet', 'image', 'font', 'media', 'other'];
+    const resourceTypes = Array.isArray(p.resourceTypes)
+      ? p.resourceTypes.filter((x: unknown): x is string => typeof x === 'string' && allowedTypes.includes(x))
+      : ['fetch', 'xmlhttprequest'];
+    // Serial + atomic write: rapid checkbox clicks must not let an earlier async
+    // write overwrite the latest selection, nor briefly sync half the state.
+    observeWriteQueue = observeWriteQueue.then(() => storageSetMany({
+      observeEnabled: enabled,
+      observeResourceTypes: resourceTypes,
+    }));
+    observeWriteQueue
+      .then(() => sendResponse({ success: true, observeEnabled: enabled, observeResourceTypes: resourceTypes }))
+      .catch(() => sendResponse({ success: false }));
     return true;
   }
 
@@ -536,7 +611,7 @@ chrome.runtime.onMessage.addListener((msg: any, _sender: any, sendResponse: any)
 
   // ---- API Tester: proxy request (bypasses CORS) ----
   if (t === 'API_TEST_REQUEST') {
-    const { method = 'GET', url = '', headers = {}, body, refreshCookie = false } = (msg.payload || {}) as { method: string; url: string; headers: Record<string, string>; body?: string; refreshCookie?: boolean };
+    const { method = 'GET', url = '', headers = {}, body, bodyType = 'raw', refreshCookie = false } = (msg.payload || {}) as { method: string; url: string; headers: Record<string, string>; body?: string; bodyType?: string; refreshCookie?: boolean };
     if (!url || !/^https?:\/\//i.test(url)) {
       sendResponse({ error: '仅支持 http:// 和 https:// 协议' });
       return false;
@@ -588,7 +663,20 @@ chrome.runtime.onMessage.addListener((msg: any, _sender: any, sendResponse: any)
       }
 
       const init: RequestInit = { method, headers: hdrs };
-      if (body && method !== 'GET' && method !== 'HEAD') init.body = body;
+      if (body && method !== 'GET' && method !== 'HEAD') {
+        if (bodyType === 'urlencoded') {
+          try { init.body = new URLSearchParams(body); }
+          catch { init.body = body; }
+        } else if (bodyType === 'form' || bodyType === 'multipart') {
+          try {
+            const form = new FormData();
+            const parts = JSON.parse(body);
+            if (Array.isArray(parts)) parts.forEach((p: any) => form.append(String(p.name || ''), String(p.value ?? '')));
+            init.body = form;
+            for (const key of [...hdrs.keys()]) if (key.toLowerCase() === 'content-type') hdrs.delete(key);
+          } catch { init.body = body; }
+        } else init.body = body;
+      }
 
       // 30s timeout via AbortController
       const ac = new AbortController();
@@ -668,11 +756,13 @@ chrome.runtime.onMessage.addListener((msg: any, _sender: any, sendResponse: any)
   if (t === 'API_TEST_HISTORY_GET') { storageGet<any[]>('apiHistory', []).then(sendResponse); return true; }
   if (t === 'API_TEST_HISTORY_SAVE') {
     if (!msg.payload) { sendResponse({ success: false }); return true; }
-    storageGet<any[]>('apiHistory', []).then(history => {
+    historyWriteQueue = historyWriteQueue.then(async () => {
+      const history = await storageGet<any[]>('apiHistory', []);
       history.unshift(msg.payload);
       if (history.length > 50) history.length = 50;
-      storageSet('apiHistory', history).then(() => sendResponse({ success: true }));
+      await storageSet('apiHistory', history);
     });
+    historyWriteQueue.then(() => sendResponse({ success: true })).catch(() => sendResponse({ success: false }));
     return true;
   }
   if (t === 'API_TEST_HISTORY_CLEAR') { storageSet('apiHistory', []).then(() => sendResponse({ success: true })); return true; }
@@ -683,11 +773,18 @@ chrome.runtime.onMessage.addListener((msg: any, _sender: any, sendResponse: any)
   // ---- Intercepted Request Log ----
   if (t === 'LOG_SAVE') {
     if (!msg.payload) { return false; }
-    storageGet<any[]>('interceptLog', []).then(log => {
+    // Serialize read-modify-write operations so near-simultaneous request/response
+    // logs cannot overwrite each other in chrome.storage.
+    logWriteQueue = logWriteQueue.then(async () => {
+      const log = await storageGet<any[]>('interceptLog', []);
       log.unshift(msg.payload);
       if (log.length > 200) log.length = 200;
-      return storageSet('interceptLog', log);
-    }).then(() => sendResponse({ ok: true })).catch(() => sendResponse({ ok: false }));
+      let bytes = 0;
+      for (const item of log) bytes += JSON.stringify(item).length * 2;
+      while (log.length && bytes > MAX_INTERCEPT_LOG_BYTES) bytes -= JSON.stringify(log.pop()).length * 2;
+      await storageSet('interceptLog', log);
+    });
+    logWriteQueue.then(() => sendResponse({ ok: true })).catch(() => sendResponse({ ok: false }));
     return true;
   }
   if (t === 'LOG_GET') { storageGet<any[]>('interceptLog', []).then(sendResponse); return true; }

@@ -11,16 +11,19 @@ else { document.addEventListener('DOMContentLoaded', function () { (document.bod
 var badgeActive = false;
 var lastRuleCount = 0;
 var cachedShowBadge = false;
+var hasStorageApi = !!(chrome.storage && chrome.storage.local);
 
 // Cache showBadge value to avoid storage reads on every update
-chrome.storage.local.get('showBadge', function (res) {
-  cachedShowBadge = res?.showBadge === true;
-});
-chrome.storage.onChanged.addListener(function (changes, area) {
-  if (area === 'local' && changes.showBadge) {
-    cachedShowBadge = changes.showBadge.newValue === true;
-  }
-});
+if (hasStorageApi) {
+  chrome.storage.local.get('showBadge', function (res) {
+    cachedShowBadge = res?.showBadge === true;
+  });
+  chrome.storage.onChanged.addListener(function (changes, area) {
+    if (area === 'local' && changes.showBadge) {
+      cachedShowBadge = changes.showBadge.newValue === true;
+    }
+  });
+}
 
 function updateBadge(active: boolean, count: number, reqCount?: number) {
   badgeActive = active && count > 0;
@@ -55,11 +58,15 @@ window.addEventListener('message', function (e) {
 });
 
 // Inject main-world interceptor
-var s = document.createElement('script');
-s.src = chrome.runtime.getURL('interceptor.js');
-s.onload = function () { s.remove(); };
-s.onerror = function () {};
-(document.head || document.documentElement).appendChild(s);
+// 扩展被重新加载后，旧标签页里残留的内容脚本上下文会失效，chrome.runtime 变为
+// undefined；此时访问 getURL 会抛 Uncaught TypeError。加防御性判断，失效上下文直接跳过。
+if (chrome.runtime && typeof chrome.runtime.getURL === 'function') {
+  var s = document.createElement('script');
+  s.src = chrome.runtime.getURL('interceptor.js');
+  s.onload = function () { s.remove(); };
+  s.onerror = function () {};
+  (document.head || document.documentElement).appendChild(s);
+}
 
 // Sync all rules + state to interceptor
 var contextDead = false;
@@ -80,7 +87,7 @@ function syncAll() {
       }
       if (!resp) return;
       var state = resp;
-      var hasActive = state.globalEnabled && state.rules.some(function (r: any) { return r.enabled; });
+      var hasActive = state.globalEnabled && (state.rules.some(function (r: any) { return r.enabled; }) || state.observeEnabled === true);
       updateBadge(hasActive, state.rules.filter(function (r: any) { return r.enabled; }).length);
 
       window.postMessage({
@@ -88,7 +95,9 @@ function syncAll() {
         active: hasActive,
         globalEnabled: state.globalEnabled,
         rules: state.rules,
-        groups: state.groups
+        groups: state.groups,
+        observeEnabled: state.observeEnabled === true,
+        observeResourceTypes: Array.isArray(state.observeResourceTypes) ? state.observeResourceTypes : ['fetch', 'xmlhttprequest']
       }, '*');
     });
   } catch (_) { contextDead = true; }
@@ -103,12 +112,14 @@ window.addEventListener('message', function handler(e) {
 });
 
 // Sync on storage changes (replaces polling — more efficient, no SW wake-ups)
-chrome.storage.onChanged.addListener(function (changes, area) {
-  if (area !== 'local') return;
-  if (changes.rules || changes.groups || changes.globalEnabled || changes.showBadge) {
-    syncAll();
-  }
-});
+if (hasStorageApi) {
+  chrome.storage.onChanged.addListener(function (changes, area) {
+    if (area !== 'local') return;
+    if (changes.rules || changes.groups || changes.globalEnabled || changes.showBadge || changes.observeEnabled || changes.observeResourceTypes) {
+      syncAll();
+    }
+  });
+}
 
 // Content script loaded
 } // end __apimockflow_loaded guard
