@@ -212,7 +212,19 @@ function registerAuthListener(whitelist: string[]) {
   }
 }
 
-// 启动时按当前白名单注册，并在白名单变化时重建
+// MV3：webRequest 监听必须在 SW 顶层【同步】注册。若只在 .then() 里异步挂，
+// SW 被回收后重新唤醒时会晚一拍——Chrome 据「唤醒那一刻是否已有监听」决定要不要
+// 为该事件唤醒 SW，晚注册会导致 SW 休眠后再也捕获不到页面 XHR 的认证头
+// （表现为「同步登录态只同步到 Cookie、Authorization 一个没抓到」）。
+// 故先同步挂 <all_urls> 兜底，再按白名单收窄（registerAuthListener 会先 remove 再 add）。
+if (chrome.webRequest?.onBeforeSendHeaders) {
+  try {
+    chrome.webRequest.onBeforeSendHeaders.addListener(
+      authHeaderListener, { urls: ['<all_urls>'], types: ['xmlhttprequest'] }, ['requestHeaders', 'extraHeaders'],
+    );
+  } catch (_) { /* ignore */ }
+}
+// 启动时按当前白名单收窄，并在白名单变化时重建
 storageGet<string[]>(WHITELIST_KEY, []).then(registerAuthListener);
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area === 'local' && changes[WHITELIST_KEY]) {

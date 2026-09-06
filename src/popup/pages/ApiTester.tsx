@@ -483,6 +483,13 @@ export default function ApiTester({ onCreateRule, prefillRequest, prefillName, o
       if (authCount) parts.push(`${authCount} 个认证头`);
       const base = parts.length ? `已同步 ${parts.join('、')}` : '已同步登录态';
 
+      // 只同步到 Cookie、没抓到认证头：明确告知，避免误以为 Authorization 已同步。
+      // （SW 刚被唤醒/该系统尚未发起过带 token 的请求时会这样；仅用 Cookie 鉴权则可忽略。）
+      if (authCount === 0) {
+        showToast(`${base}；未捕获到该站点认证头——若该系统用 Authorization/Token 鉴权，请先在浏览器里对其发起一次带 token 的请求再同步（仅用 Cookie 鉴权可忽略）`, 'warning', 6000);
+        return;
+      }
+
       // JWT 过期提醒：取所有认证头里最早的 exp
       let soonestExp: number | null = null;
       for (const v of Object.values(authHeaders)) {
