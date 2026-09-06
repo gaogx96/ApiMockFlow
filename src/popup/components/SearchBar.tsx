@@ -23,7 +23,7 @@ export default function SearchBar({ query, onQueryChange, count, index, onNext, 
   useEffect(() => { inputRef.current?.focus(); }, []);
 
   return (
-    <div className="search-bar">
+    <div className="search-bar" role="search">
       <Icon name="search" size={12} className="shrink-0" style={{ color: 'var(--faint)' }} aria-hidden />
       <input
         ref={inputRef}
@@ -34,6 +34,7 @@ export default function SearchBar({ query, onQueryChange, count, index, onNext, 
           else if (e.key === 'Escape') { e.preventDefault(); onClose(); }
         }}
         placeholder={placeholder}
+        aria-label="搜索关键字"
         className="search-bar-input"
       />
       <span className="search-bar-count" style={{ color: count ? 'var(--text2)' : 'var(--faint)' }}>
