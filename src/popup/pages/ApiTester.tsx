@@ -557,15 +557,19 @@ export default function ApiTester({ onCreateRule, prefillRequest, prefillName, o
       else h['Content-Type'] = contentTypeFor(tab.bodyType);
     }
 
-    // 发送时解析动态变量（{{$ts}} 等），使实际请求与历史记录都落地为当前时刻的字面值
+    // 历史与重放用「未解析」请求：保留 {{$ts}} 等占位符，使再次发起/复制 cURL 时按“当时”重新解析，
+    // 避免把某一次发送时刻的时间戳冻结进历史（否则重放会带上过期时间戳，被服务端判为 timestamp error）。
+    const rawReq: ApiRequest = { method: tab.method, url: tab.url.trim(), headers: h, body: tab.body || undefined, bodyType: tab.bodyType as any };
+
+    // 仅为本次网络发送把占位符解析成当前时刻的字面值
     const now = Date.now();
     const rh: Record<string, string> = {};
     for (const [k, v] of Object.entries(h)) rh[resolveDynamicVars(k, { now })] = resolveDynamicVars(v, { now });
     const rUrl = resolveDynamicVars(tab.url.trim(), { now });
     const rBody = tab.body ? resolveDynamicVars(tab.body, { now }) : undefined;
 
-    const req: ApiRequest = { method: tab.method, url: rUrl, headers: rh, body: rBody, bodyType: tab.bodyType as any };
-    chrome.runtime.sendMessage({ type: 'API_TEST_REQUEST', payload: { ...req, refreshCookie: tab.autoRefreshCookie } }, (resp) => {
+    const wireReq: ApiRequest = { method: tab.method, url: rUrl, headers: rh, body: rBody, bodyType: tab.bodyType as any };
+    chrome.runtime.sendMessage({ type: 'API_TEST_REQUEST', payload: { ...wireReq, refreshCookie: tab.autoRefreshCookie } }, (resp) => {
       updateTab('loading', false);
       const lastErr = chrome.runtime.lastError;
       if (lastErr) {
@@ -573,23 +577,23 @@ export default function ApiTester({ onCreateRule, prefillRequest, prefillName, o
         if (lastErr.message?.includes('Extension context invalidated')) {
           const error = '扩展上下文已失效，请刷新插件 Popup 或重新加载扩展 (chrome://extensions → 刷新)';
           updateTab('error', error);
-          saveToHistory(req, undefined, error);
+          saveToHistory(rawReq, undefined, error);
         } else {
           const error = '通信错误: ' + lastErr.message;
           updateTab('error', error);
-          saveToHistory(req, undefined, error);
+          saveToHistory(rawReq, undefined, error);
         }
         return;
       }
       if (!resp) {
         const error = '请求失败：后台脚本未响应。请检查扩展是否正常运行，或尝试重新加载扩展。';
         updateTab('error', error);
-        saveToHistory(req, undefined, error);
+        saveToHistory(rawReq, undefined, error);
         return;
       }
-      if (resp.error) { updateTab('error', resp.error); saveToHistory(req, undefined, resp.error); return; }
+      if (resp.error) { updateTab('error', resp.error); saveToHistory(rawReq, undefined, resp.error); return; }
       updateTab('response', resp);
-      saveToHistory(req, resp);
+      saveToHistory(rawReq, resp);
     });
   }
 
