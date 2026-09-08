@@ -11,10 +11,10 @@ import { generateId } from '../../shared/constants';
 import { showToast, showConfirm } from '../../shared/toast';
 import { repairAndFormatJson, minifyJson } from '../../shared/json-format';
 import { parseJwtExpiry, humanizeDuration } from '../../shared/jwt';
-import { resolveDynamicVars, hasDynamicVars, decodeDynamicVars } from '../../shared/dynamic-vars';
+import { resolveDynamicVars, hasDynamicVars, decodeDynamicVars, DYNAMIC_VAR_TOKENS } from '../../shared/dynamic-vars';
 import { detectTimestamps, applyTimestamps, TsCandidate } from '../../shared/timestamp-detect';
-import DynamicVarMenu from '../components/DynamicVarMenu';
 import { kickCompositorPresent } from '../compositor';
+
 
 /** 「插入动态变量」按钮的目标字段位置：URL / 请求体 / query 参数某项 / 请求头某项 */
 type FieldTarget =
@@ -292,6 +292,17 @@ export default function ApiTester({ onCreateRule, prefillRequest, prefillName, o
   const activeFieldRef = useRef<{ el: HTMLInputElement | HTMLTextAreaElement; target: FieldTarget } | null>(null);
   // 切换标签后旧字段的 DOM 已不属于当前请求，清空以免插入到不可见字段（默认退化为 URL）
   useEffect(() => { activeFieldRef.current = null; }, [activeIdx]);
+  // 「更多」溢出菜单（内网放行 + 插入时间戳等低频项）：向下展开、右对齐；点外部/Esc 关闭
+  const [moreOpen, setMoreOpen] = useState(false);
+  const moreMenuRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!moreOpen) return;
+    const onDown = (e: MouseEvent) => { if (moreMenuRef.current && !moreMenuRef.current.contains(e.target as Node)) setMoreOpen(false); };
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setMoreOpen(false); };
+    document.addEventListener('mousedown', onDown);
+    document.addEventListener('keydown', onKey);
+    return () => { document.removeEventListener('mousedown', onDown); document.removeEventListener('keydown', onKey); };
+  }, [moreOpen]);
   const [bodySearchOpen, setBodySearchOpen] = useState(false);
   const [bodyQuery, setBodyQuery] = useState('');
   const bodySearch = useTextareaSearch(bodyTaRef, tab?.body ?? '', bodySearchOpen ? bodyQuery : '');
@@ -473,6 +484,21 @@ export default function ApiTester({ onCreateRule, prefillRequest, prefillName, o
     // 尚未聚焦任何字段时，默认插入到 URL（URL 栏常驻，光标退化为末尾）
     if (urlInputRef.current) return { el: urlInputRef.current, apply: applyForTarget({ kind: 'url' }) };
     return null;
+  };
+  // 把占位符插到「光标所在字段」。以 DOM 为准读当前值与选区，写回后 rAF 恢复焦点与光标。
+  const insertDynamicVar = (text: string) => {
+    const target = resolveInsertTarget();
+    const el = target?.el;
+    if (!target || !el) return;
+    const cur = el.value;
+    const start = el.selectionStart ?? cur.length;
+    const end = el.selectionEnd ?? cur.length;
+    const next = cur.slice(0, start) + text + cur.slice(end);
+    const caret = start + text.length;
+    target.apply(next);
+    requestAnimationFrame(() => {
+      try { el.focus({ preventScroll: true }); el.setSelectionRange(caret, caret); } catch (_) { /* 元素可能已卸载 */ }
+    });
   };
 
   function getHeadersRecord(): Record<string, string> {
@@ -1096,10 +1122,6 @@ export default function ApiTester({ onCreateRule, prefillRequest, prefillName, o
             onFocus={trackField({ kind: 'url' })}
             onKeyDown={e => e.key === 'Enter' && sendRequest()}
             className="form-input flex-1 text-xs" style={{ minWidth: 0, padding: '4px 8px', fontSize: 11 }} />
-          <DynamicVarMenu
-            resolveTarget={resolveInsertTarget}
-            label="插入动态变量到光标处（时间戳，支持 URL / 参数 / 请求头 / 请求体）"
-            className="shrink-0" />
           <button onClick={sendRequest} disabled={tab.loading} className="btn-primary whitespace-nowrap">
             <Icon name="send" size={15} />{tab.loading ? '发送中...' : '发送'}
           </button>
@@ -1115,16 +1137,50 @@ export default function ApiTester({ onCreateRule, prefillRequest, prefillName, o
             data-tip="导入请求">
             <Icon name="clipboard-paste" size={16} />
           </button>
-          <button onClick={toggleAllowInternal}
-            className={`px-2 py-1 text-xs border rounded-md transition-colors ${
-              allowInternal
-                ? 'border-green-300 bg-green-50 text-green-700 dark:border-green-600 dark:bg-green-900/30 dark:text-green-400'
-                : 'border-gray-200 text-amber-500 dark:border-slate-700 dark:bg-slate-900 dark:text-amber-400'
-            }`}
-            aria-label={allowInternal ? '允许访问内网地址（点击关闭）' : '内网地址已拦截（点击放行）'}
-            data-tip={allowInternal ? '内网已放行' : '内网已拦截'}>
-            <Icon name={allowInternal ? 'shield-check' : 'shield-alert'} size={14} />
-          </button>
+          {/* 更多：低频项收进溢出菜单，向下展开、右对齐，避免工具栏拥挤 */}
+          <div className="relative shrink-0" ref={moreMenuRef}>
+            <button onClick={() => setMoreOpen(o => !o)}
+              className={`btn-ghost ${moreOpen ? 'text-primary-600' : ''}`}
+              aria-label="更多（内网放行 / 插入时间戳）"
+              aria-haspopup="menu"
+              aria-expanded={moreOpen}
+              data-tip="更多">
+              <Icon name="ellipsis" size={16} />
+            </button>
+            {moreOpen && (
+              <div className="settings-menu" role="menu" style={{ minWidth: 244 }}>
+                <button className="menu-item" role="menuitem" onClick={toggleAllowInternal}
+                  aria-label={allowInternal ? '允许访问内网地址（点击关闭）' : '内网地址已拦截（点击放行）'}>
+                  <Icon name={allowInternal ? 'shield-check' : 'shield-alert'} size={16}
+                    className={allowInternal ? 'text-green-600 dark:text-green-400' : 'text-amber-500 dark:text-amber-400'} />
+                  <span className="flex-1">内网地址访问</span>
+                  <span style={{ fontSize: 11, fontWeight: 600 }}
+                    className={allowInternal ? 'text-green-600 dark:text-green-400' : 'text-gray-400 dark:text-slate-500'}>
+                    {allowInternal ? '已放行' : '已拦截'}
+                  </span>
+                </button>
+                <div style={{ height: 1, background: 'var(--border)', margin: '4px 6px' }} />
+                <div style={{ padding: '2px 10px 4px', fontSize: 11, color: 'var(--text2)', fontWeight: 600 }}>插入时间戳（光标处）</div>
+                {DYNAMIC_VAR_TOKENS.map((t) => {
+                  const preview = resolveDynamicVars(t.insert);
+                  return (
+                    <button key={t.name} className="menu-item" role="menuitem"
+                      style={{ flexDirection: 'column', alignItems: 'stretch', gap: 2 }}
+                      onClick={() => { insertDynamicVar(t.insert); setMoreOpen(false); }}>
+                      <span className="flex items-center justify-between gap-2">
+                        <code style={{ fontSize: 11.5, color: 'var(--accent-fg, #4f46e5)' }}>{t.insert}</code>
+                        <span style={{ fontSize: 11, color: 'var(--text2)' }}>{t.label}</span>
+                      </span>
+                      <span style={{ fontSize: 10.5, color: 'var(--text3, var(--text2))', opacity: 0.8, wordBreak: 'break-all' }}>= {preview}</span>
+                    </button>
+                  );
+                })}
+                <div style={{ padding: '4px 10px 2px', fontSize: 10, color: 'var(--text2)', opacity: 0.75, lineHeight: 1.4 }}>
+                  插到光标所在字段（URL / 参数 / 请求头 / 请求体）；支持秒级偏移，如 <code>{'{{$ts+30}}'}</code>、<code>{'{{$ts-60}}'}</code>；发送时按当前时刻解析
+                </div>
+              </div>
+            )}
+          </div>
         </div>
       </div>
 

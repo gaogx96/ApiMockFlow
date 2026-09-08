@@ -1,7 +1,7 @@
 import type { ComponentType, SVGProps } from 'react';
 import {
   Activity, AlertTriangle, ArrowRightToLine, Bookmark, BookmarkX, Braces, Check, ChevronDown, ChevronLeft, ChevronRight, ChevronUp,
-  ClipboardList, ClipboardPaste, Clock3, Copy, Download, ExternalLink, Eye, EyeOff, FileSearch,
+  ClipboardList, ClipboardPaste, Clock3, Copy, Download, Ellipsis, ExternalLink, Eye, EyeOff, FileSearch,
   FlaskConical, FolderInput, GitCompareArrows, KeyRound, List, ListFilter, ListTree, Maximize2, Moon, PanelLeftClose, PanelLeftOpen, Pencil, Plus,
   Repeat2, RefreshCw, Search, Send, Settings, ShieldAlert, ShieldCheck, Sun, Table2, Tag, Trash2, Upload,
   Wrench, X, Zap,
@@ -16,7 +16,7 @@ import {
  */
 export type IconName =
   | 'activity' | 'alert-triangle' | 'arrow-right-to-line' | 'bookmark' | 'bookmark-x' | 'braces' | 'check' | 'chevron-down' | 'chevron-left'
-  | 'chevron-right' | 'chevron-up' | 'clipboard-list' | 'clipboard-paste' | 'clock-3' | 'copy' | 'download'
+  | 'chevron-right' | 'chevron-up' | 'clipboard-list' | 'clipboard-paste' | 'clock-3' | 'copy' | 'download' | 'ellipsis'
   | 'external-link' | 'eye' | 'eye-off' | 'file-search' | 'flask-conical' | 'folder-input' | 'git-compare-arrows'
   | 'key-round' | 'list' | 'list-filter' | 'list-tree' | 'maximize-2' | 'moon' | 'panel-left-close' | 'panel-left-open' | 'pencil' | 'plus' | 'repeat-2'
   | 'refresh-cw' | 'search' | 'send' | 'settings' | 'shield-alert' | 'shield-check' | 'sun' | 'table-2' | 'tag'
@@ -26,7 +26,7 @@ const REGISTRY: Record<IconName, ComponentType<SVGProps<SVGSVGElement>>> = {
   activity: Activity, 'alert-triangle': AlertTriangle, 'arrow-right-to-line': ArrowRightToLine, bookmark: Bookmark, 'bookmark-x': BookmarkX, braces: Braces, check: Check,
   'chevron-down': ChevronDown, 'chevron-left': ChevronLeft, 'chevron-right': ChevronRight,
   'chevron-up': ChevronUp, 'clipboard-list': ClipboardList, 'clipboard-paste': ClipboardPaste, 'clock-3': Clock3, copy: Copy,
-  download: Download, 'external-link': ExternalLink, eye: Eye, 'eye-off': EyeOff,
+  download: Download, 'ellipsis': Ellipsis, 'external-link': ExternalLink, eye: Eye, 'eye-off': EyeOff,
   'file-search': FileSearch, 'flask-conical': FlaskConical, 'folder-input': FolderInput, 'git-compare-arrows': GitCompareArrows,
   'key-round': KeyRound, list: List, 'list-filter': ListFilter, 'list-tree': ListTree, 'maximize-2': Maximize2, moon: Moon,
   'panel-left-close': PanelLeftClose, 'panel-left-open': PanelLeftOpen,
