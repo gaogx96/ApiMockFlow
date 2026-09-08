@@ -71,3 +71,19 @@ export function resolveDynamicVars(input: string, opts?: { now?: number }): stri
     return computeValue(name, baseMs, offsetSec);
   });
 }
+
+/**
+ * 还原被百分号编码过的内置动态变量占位符。
+ *
+ * 查询参数编辑器用 URLSearchParams / encodeURIComponent 重建 URL 时，会把 {{$ts}}
+ * 编码成 %7B%7B%24ts%7D%7D，导致 resolveDynamicVars（按字面花括号匹配）匹配不到，
+ * 于是把编码后的占位符原样发出（服务端再解码回 {{$ts}}，时间戳永远不刷新）。
+ * 本函数只解码「以 $ 开头的内置动态占位符」这一段，其余百分号编码保持不变，
+ * 保证 URL 里仍带明文占位符、发送时可被正常解析。
+ */
+export function decodeDynamicVars(input: string): string {
+  if (!input || input.indexOf('%7B%7B') === -1 && input.indexOf('%7b%7b') === -1) return input;
+  return input.replace(/%7B%7B(?:%20|\+)*%24[\s\S]*?%7D%7D/gi, (m) => {
+    try { return decodeURIComponent(m); } catch { return m; }
+  });
+}

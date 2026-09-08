@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   resolveDynamicVars,
   hasDynamicVars,
+  decodeDynamicVars,
   DYNAMIC_VAR_TOKENS,
 } from '../shared/dynamic-vars';
 
@@ -74,5 +75,43 @@ describe('DYNAMIC_VAR_TOKENS', () => {
       expect(hasDynamicVars(t.insert)).toBe(true);
       expect(resolveDynamicVars(t.insert, { now: NOW })).not.toBe(t.insert);
     }
+  });
+});
+
+describe('decodeDynamicVars', () => {
+  it('还原被 URLSearchParams 编码的 {{$ts}}', () => {
+    // new URL(...).searchParams.append('ts','{{$ts}}') + toString() 的产物
+    const encoded = 'https://x.test/api?ts=%7B%7B%24ts%7D%7D';
+    const decoded = decodeDynamicVars(encoded);
+    expect(decoded).toBe('https://x.test/api?ts={{$ts}}');
+    // 还原后可被正常解析成时间戳字面值
+    expect(resolveDynamicVars(decoded, { now: NOW })).toBe(`https://x.test/api?ts=${NOW_SEC}`);
+  });
+
+  it('还原带正偏移的编码占位符（+ 被编码为 %2B）', () => {
+    const encoded = 'https://x.test?t=%7B%7B%24ts%2B30%7D%7D';
+    expect(decodeDynamicVars(encoded)).toBe('https://x.test?t={{$ts+30}}');
+  });
+
+  it('还原带负偏移的编码占位符（- 不被编码）', () => {
+    const encoded = 'https://x.test?t=%7B%7B%24ts-60%7D%7D';
+    expect(decodeDynamicVars(encoded)).toBe('https://x.test?t={{$ts-60}}');
+  });
+
+  it('还原多个编码占位符', () => {
+    const encoded = 'https://x.test?a=%7B%7B%24ts%7D%7D&b=%7B%7B%24tsMs%7D%7D';
+    expect(decodeDynamicVars(encoded)).toBe('https://x.test?a={{$ts}}&b={{$tsMs}}');
+  });
+
+  it('不动其它百分号编码（仅解占位符段）', () => {
+    // 中文值编码不应被还原，只有占位符段被解
+    const encoded = 'https://x.test?name=%E4%BD%A0%E5%A5%BD&t=%7B%7B%24ts%7D%7D';
+    expect(decodeDynamicVars(encoded)).toBe('https://x.test?name=%E4%BD%A0%E5%A5%BD&t={{$ts}}');
+  });
+
+  it('对不含编码占位符的字符串原样返回', () => {
+    expect(decodeDynamicVars('https://x.test?t={{$ts}}')).toBe('https://x.test?t={{$ts}}');
+    expect(decodeDynamicVars('plain')).toBe('plain');
+    expect(decodeDynamicVars('')).toBe('');
   });
 });

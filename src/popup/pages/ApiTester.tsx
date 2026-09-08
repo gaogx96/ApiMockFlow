@@ -11,7 +11,7 @@ import { generateId } from '../../shared/constants';
 import { showToast, showConfirm } from '../../shared/toast';
 import { repairAndFormatJson, minifyJson } from '../../shared/json-format';
 import { parseJwtExpiry, humanizeDuration } from '../../shared/jwt';
-import { resolveDynamicVars, hasDynamicVars } from '../../shared/dynamic-vars';
+import { resolveDynamicVars, hasDynamicVars, decodeDynamicVars } from '../../shared/dynamic-vars';
 import { detectTimestamps, applyTimestamps, TsCandidate } from '../../shared/timestamp-detect';
 import DynamicVarMenu from '../components/DynamicVarMenu';
 import { kickCompositorPresent } from '../compositor';
@@ -305,13 +305,22 @@ export default function ApiTester({ onCreateRule, prefillRequest, prefillName, o
     catch { return []; }
   }
   function syncQueryFromUrl(url: string) { updateTab('queryParams', parseQuery(url)); }
+  // 用查询参数重建 URL：URLSearchParams 会把 {{$ts}} 编码成 %7B%7B%24ts%7D%7D，
+  // 这里重建后立即把动态占位符还原为明文，否则发送时正则匹配不到、会把编码占位符原样发出。
+  function rebuildUrlFromParams(params: { enabled: boolean; key: string; value: string }[]) {
+    try {
+      const u = new URL(tab.url); u.search = '';
+      params.filter(p => p.enabled && p.key).forEach(p => u.searchParams.append(p.key, p.value));
+      updateTab('url', decodeDynamicVars(u.toString()));
+    } catch { /* incomplete URL */ }
+  }
   function updateQuery(index: number, field: 'enabled' | 'key' | 'value', value: boolean | string) {
     const params = tab.queryParams.map((p, i) => i === index ? { ...p, [field]: value } : p);
     updateTab('queryParams', params);
-    try { const u = new URL(tab.url); u.search = ''; params.filter(p => p.enabled && p.key).forEach(p => u.searchParams.append(p.key, p.value)); updateTab('url', u.toString()); } catch { /* incomplete URL */ }
+    rebuildUrlFromParams(params);
   }
   function addQuery() { updateTab('queryParams', [...tab.queryParams, { enabled: true, key: '', value: '' }]); }
-  function removeQuery(index: number) { const params = tab.queryParams.filter((_, i) => i !== index); updateTab('queryParams', params); try { const u = new URL(tab.url); u.search = ''; params.filter(p => p.enabled && p.key).forEach(p => u.searchParams.append(p.key, p.value)); updateTab('url', u.toString()); } catch {} }
+  function removeQuery(index: number) { const params = tab.queryParams.filter((_, i) => i !== index); updateTab('queryParams', params); rebuildUrlFromParams(params); }
 
   function updateTab<K extends keyof TabData>(key: K, val: TabData[K]) {
     setTabs(prev => prev.map((t, i) => i === activeIdx ? { ...t, [key]: val } : t));
@@ -559,13 +568,15 @@ export default function ApiTester({ onCreateRule, prefillRequest, prefillName, o
 
     // 历史与重放用「未解析」请求：保留 {{$ts}} 等占位符，使再次发起/复制 cURL 时按“当时”重新解析，
     // 避免把某一次发送时刻的时间戳冻结进历史（否则重放会带上过期时间戳，被服务端判为 timestamp error）。
-    const rawReq: ApiRequest = { method: tab.method, url: tab.url.trim(), headers: h, body: tab.body || undefined, bodyType: tab.bodyType as any };
+    // decodeDynamicVars：归一化任何已被百分号编码的占位符（如旧数据里的 %7B%7B%24ts%7D%7D），还原成明文再存。
+    const rawUrl = decodeDynamicVars(tab.url.trim());
+    const rawReq: ApiRequest = { method: tab.method, url: rawUrl, headers: h, body: tab.body || undefined, bodyType: tab.bodyType as any };
 
     // 仅为本次网络发送把占位符解析成当前时刻的字面值
     const now = Date.now();
     const rh: Record<string, string> = {};
     for (const [k, v] of Object.entries(h)) rh[resolveDynamicVars(k, { now })] = resolveDynamicVars(v, { now });
-    const rUrl = resolveDynamicVars(tab.url.trim(), { now });
+    const rUrl = resolveDynamicVars(rawUrl, { now });
     const rBody = tab.body ? resolveDynamicVars(tab.body, { now }) : undefined;
 
     const wireReq: ApiRequest = { method: tab.method, url: rUrl, headers: rh, body: rBody, bodyType: tab.bodyType as any };
@@ -923,9 +934,10 @@ export default function ApiTester({ onCreateRule, prefillRequest, prefillName, o
 
   function requestToCurl(req: ApiRequest, includeSensitive = false): string {
     // 复制为 cURL 时把动态变量解析成当前时刻的字面值（对已解析的历史记录为幂等无副作用）
+    // 先 decodeDynamicVars 归一化 URL 里可能被编码的占位符，再解析，避免复制出编码后的死占位符。
     const now = Date.now();
     const rv = (s: string) => resolveDynamicVars(s, { now });
-    const lines = [`curl ${shellQuote(rv(req.url))}`, `  -X ${req.method}`];
+    const lines = [`curl ${shellQuote(rv(decodeDynamicVars(req.url)))}`, `  -X ${req.method}`];
     for (const [key, value] of Object.entries(req.headers)) {
       if (!key.trim()) continue;
       if (req.bodyType === 'multipart' && key.toLowerCase() === 'content-type') continue;
