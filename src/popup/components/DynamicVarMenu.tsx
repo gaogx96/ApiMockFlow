@@ -3,35 +3,39 @@ import { createPortal } from 'react-dom';
 import Icon from './Icon';
 import { DYNAMIC_VAR_TOKENS, resolveDynamicVars } from '../../shared/dynamic-vars';
 
+/** 插入目标：光标所在的输入框/文本域，以及把新值写回父状态的回调 */
+export interface InsertTarget {
+  el: HTMLInputElement | HTMLTextAreaElement | null;
+  apply: (next: string) => void;
+}
+
 /**
  * 动态变量插入菜单
  *
  * 触发器为一个小按钮（时钟图标）；展开后列出内置动态变量（{{$ts}} 等），
- * 每项带一行当前时刻的实时解析预览。点击某项即把占位符插入到目标输入框/文本域的光标处，
- * 并回写到父组件状态（父持有输入值的单一数据源），随后恢复焦点与光标位置。
+ * 每项带一行当前时刻的实时解析预览。
+ *
+ * 目标输入框在「点击某项时」才通过 resolveTarget() 动态解析——这样单个按钮即可
+ * 把占位符插入到「当前光标所在」的任意字段（URL / query 参数 / 请求头 / 请求体）。
+ * 插入后按选区起点计算新光标位置，等父状态回写到受控 DOM 后恢复焦点与光标。
  *
  * 弹层复用 Select 的 portal + fixed 定位思路，避免被滚动容器裁切。
  */
 interface DynamicVarMenuProps {
-  /** 目标输入框/文本域，用于读取光标位置与恢复焦点；不传则插入到值末尾 */
-  targetRef?: React.RefObject<HTMLInputElement | HTMLTextAreaElement | null>;
-  /** 当前值（父状态） */
-  value: string;
-  /** 插入后回写新值（父负责 setState） */
-  onInsert: (next: string) => void;
+  /** 点击插入项时解析当前目标（光标所在字段）；返回 null 或无 el 时不插入 */
+  resolveTarget: () => InsertTarget | null;
   /** 触发器额外类名 */
   className?: string;
   /** 无障碍/提示文案 */
   label?: string;
 }
 
-export default function DynamicVarMenu({ targetRef, value, onInsert, className = '', label = '插入动态变量' }: DynamicVarMenuProps) {
+export default function DynamicVarMenu({ resolveTarget, className = '', label = '插入动态变量' }: DynamicVarMenuProps) {
   const [open, setOpen] = useState(false);
   const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
   const [nowTick, setNowTick] = useState(0); // 打开时刷新预览
   const triggerRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
-  const caretRef = useRef<number | null>(null);
 
   const place = useCallback(() => {
     const el = triggerRef.current;
@@ -80,30 +84,22 @@ export default function DynamicVarMenu({ targetRef, value, onInsert, className =
     };
   }, [open, place]);
 
-  // 插入后恢复光标位置（等父状态回写到 DOM 后再设）
-  useEffect(() => {
-    if (caretRef.current == null) return;
-    const el = targetRef?.current;
-    if (el) {
-      const p = caretRef.current;
-      el.focus({ preventScroll: true });
-      try { el.setSelectionRange(p, p); } catch (_) {}
-    }
-    caretRef.current = null;
-  }, [value, targetRef]);
-
   const insert = (text: string) => {
-    const el = targetRef?.current;
-    let start = value.length;
-    let end = value.length;
-    if (el && el.selectionStart != null && el.selectionEnd != null) {
-      start = el.selectionStart;
-      end = el.selectionEnd;
-    }
-    const next = value.slice(0, start) + text + value.slice(end);
-    caretRef.current = el ? start + text.length : null;
-    onInsert(next);
     setOpen(false);
+    const target = resolveTarget();
+    const el = target?.el;
+    if (!target || !el) return; // 无法定位光标时宁可不插入，也不误插到别处
+    // 以 DOM 为准读取「当前值」与选区，避免父状态回写与实时输入之间的时序错位
+    const cur = el.value;
+    const start = el.selectionStart ?? cur.length;
+    const end = el.selectionEnd ?? cur.length;
+    const next = cur.slice(0, start) + text + cur.slice(end);
+    const caret = start + text.length;
+    target.apply(next);
+    // 等受控组件把新值渲染到 DOM 后，再恢复焦点与光标位置
+    requestAnimationFrame(() => {
+      try { el.focus({ preventScroll: true }); el.setSelectionRange(caret, caret); } catch (_) { /* 元素可能已卸载 */ }
+    });
   };
 
   return (
@@ -152,7 +148,7 @@ export default function DynamicVarMenu({ targetRef, value, onInsert, className =
             );
           })}
           <div style={{ padding: '6px 10px 2px', fontSize: 10, color: 'var(--text2)', opacity: 0.75, lineHeight: 1.4 }}>
-            支持秒级偏移，如 <code>{'{{$ts+30}}'}</code>、<code>{'{{$ts-60}}'}</code>；发送时按当前时刻解析
+            插入到光标所在字段（URL / 参数 / 请求头 / 请求体）；支持秒级偏移，如 <code>{'{{$ts+30}}'}</code>、<code>{'{{$ts-60}}'}</code>；发送时按当前时刻解析
           </div>
         </div>,
         document.body,

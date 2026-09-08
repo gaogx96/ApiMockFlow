@@ -16,6 +16,13 @@ import { detectTimestamps, applyTimestamps, TsCandidate } from '../../shared/tim
 import DynamicVarMenu from '../components/DynamicVarMenu';
 import { kickCompositorPresent } from '../compositor';
 
+/** 「插入动态变量」按钮的目标字段位置：URL / 请求体 / query 参数某项 / 请求头某项 */
+type FieldTarget =
+  | { kind: 'url' }
+  | { kind: 'body' }
+  | { kind: 'query'; index: number; field: 'key' | 'value' }
+  | { kind: 'header'; index: number; field: 0 | 1 };
+
 const METHODS = ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'HEAD', 'OPTIONS'];
 const BODY_TYPES = [
   { value: 'raw', label: 'JSON', icon: 'braces' as const },
@@ -280,6 +287,11 @@ export default function ApiTester({ onCreateRule, prefillRequest, prefillName, o
   // 关键字搜索：请求体（可编辑 textarea → 原生选区定位）与响应体（只读 → <mark> 高亮 + 滚动定位）
   const bodyTaRef = useRef<HTMLTextAreaElement>(null);
   const urlInputRef = useRef<HTMLInputElement>(null);
+  // 记录最近获得焦点的可编辑字段，供“插入动态变量”按钮把占位符插到光标处。
+  // 存「位置描述」而非闭包：点击插入时用当前渲染的最新函数写回，避免捕获到过期的 tab 状态。
+  const activeFieldRef = useRef<{ el: HTMLInputElement | HTMLTextAreaElement; target: FieldTarget } | null>(null);
+  // 切换标签后旧字段的 DOM 已不属于当前请求，清空以免插入到不可见字段（默认退化为 URL）
+  useEffect(() => { activeFieldRef.current = null; }, [activeIdx]);
   const [bodySearchOpen, setBodySearchOpen] = useState(false);
   const [bodyQuery, setBodyQuery] = useState('');
   const bodySearch = useTextareaSearch(bodyTaRef, tab?.body ?? '', bodySearchOpen ? bodyQuery : '');
@@ -440,6 +452,28 @@ export default function ApiTester({ onCreateRule, prefillRequest, prefillName, o
   function removeHeader(idx: number) {
     updateTab('headers', tab.headers.filter((_, i) => i !== idx));
   }
+
+  // === 动态变量插入：把「光标所在字段」映射为写回回调 ===
+  // onFocus 记录字段位置；点击插入项时用当前渲染的 update* 函数生成 apply，保证写回最新状态。
+  const trackField = (target: FieldTarget) =>
+    (e: React.FocusEvent<HTMLInputElement | HTMLTextAreaElement>) => {
+      activeFieldRef.current = { el: e.currentTarget, target };
+    };
+  const applyForTarget = (t: FieldTarget): ((next: string) => void) => {
+    switch (t.kind) {
+      case 'url': return (next) => { updateTab('url', next); syncQueryFromUrl(next); };
+      case 'body': return (next) => updateBody(next);
+      case 'query': return (next) => updateQuery(t.index, t.field, next);
+      case 'header': return (next) => updateHeader(t.index, t.field, next);
+    }
+  };
+  const resolveInsertTarget = () => {
+    const a = activeFieldRef.current;
+    if (a && a.el) return { el: a.el, apply: applyForTarget(a.target) };
+    // 尚未聚焦任何字段时，默认插入到 URL（URL 栏常驻，光标退化为末尾）
+    if (urlInputRef.current) return { el: urlInputRef.current, apply: applyForTarget({ kind: 'url' }) };
+    return null;
+  };
 
   function getHeadersRecord(): Record<string, string> {
     const r: Record<string, string> = {};
@@ -1059,13 +1093,12 @@ export default function ApiTester({ onCreateRule, prefillRequest, prefillName, o
           <input type="text" placeholder="输入 URL..."
             ref={urlInputRef}
             value={tab.url} onChange={e => { updateTab('url', e.target.value); syncQueryFromUrl(e.target.value); if (!tabs[activeIdx].name || tabs[activeIdx].name === '新请求') { const d = e.target.value.replace(/^https?:\/\//, '').split('/')[0]; if (d) updateTab('name', d); } }}
+            onFocus={trackField({ kind: 'url' })}
             onKeyDown={e => e.key === 'Enter' && sendRequest()}
             className="form-input flex-1 text-xs" style={{ minWidth: 0, padding: '4px 8px', fontSize: 11 }} />
           <DynamicVarMenu
-            targetRef={urlInputRef}
-            value={tab.url}
-            onInsert={next => { updateTab('url', next); syncQueryFromUrl(next); }}
-            label="在 URL 插入动态变量（时间戳等）"
+            resolveTarget={resolveInsertTarget}
+            label="插入动态变量到光标处（时间戳，支持 URL / 参数 / 请求头 / 请求体）"
             className="shrink-0" />
           <button onClick={sendRequest} disabled={tab.loading} className="btn-primary whitespace-nowrap">
             <Icon name="send" size={15} />{tab.loading ? '发送中...' : '发送'}
@@ -1109,7 +1142,7 @@ export default function ApiTester({ onCreateRule, prefillRequest, prefillName, o
       {tab.queryParams.length > 0 && (
         <div className="px-2 py-1.5 border-b border-gray-100 dark:border-slate-700 bg-gray-50 dark:bg-slate-900 shrink-0">
           <div className="flex items-center justify-between mb-1"><span className="text-xs font-semibold text-gray-500 dark:text-slate-400">Query 参数</span><button onClick={addQuery} className="btn-ghost p-0.5 text-xs">+ 添加</button></div>
-          <div className="space-y-1 max-h-24 overflow-y-auto">{tab.queryParams.map((p, i) => <div key={i} className="flex items-center gap-1"><input type="checkbox" checked={p.enabled} onChange={e => updateQuery(i, 'enabled', e.target.checked)} className="w-3 h-3" /><input value={p.key} onChange={e => updateQuery(i, 'key', e.target.value)} placeholder="参数名" className="form-input text-xs flex-1" style={{ padding: '3px 5px', fontSize: 11 }} /><input value={p.value} onChange={e => updateQuery(i, 'value', e.target.value)} placeholder="参数值" className="form-input text-xs flex-1" style={{ padding: '3px 5px', fontSize: 11 }} /><button onClick={() => removeQuery(i)} className="btn-ghost p-0.5 text-gray-400 hover:text-red-500" title="删除参数">×</button></div>)}</div>
+          <div className="space-y-1 max-h-24 overflow-y-auto">{tab.queryParams.map((p, i) => <div key={i} className="flex items-center gap-1"><input type="checkbox" checked={p.enabled} onChange={e => updateQuery(i, 'enabled', e.target.checked)} className="w-3 h-3" /><input value={p.key} onChange={e => updateQuery(i, 'key', e.target.value)} onFocus={trackField({ kind: 'query', index: i, field: 'key' })} placeholder="参数名" className="form-input text-xs flex-1" style={{ padding: '3px 5px', fontSize: 11 }} /><input value={p.value} onChange={e => updateQuery(i, 'value', e.target.value)} onFocus={trackField({ kind: 'query', index: i, field: 'value' })} placeholder="参数值" className="form-input text-xs flex-1" style={{ padding: '3px 5px', fontSize: 11 }} /><button onClick={() => removeQuery(i)} className="btn-ghost p-0.5 text-gray-400 hover:text-red-500" title="删除参数">×</button></div>)}</div>
         </div>
       )}
 
@@ -1282,9 +1315,11 @@ export default function ApiTester({ onCreateRule, prefillRequest, prefillName, o
               <div key={i} className="flex gap-1">
                 <input type="text" placeholder="键" value={k}
                   onChange={e => updateHeader(i, 0, e.target.value)}
+                  onFocus={trackField({ kind: 'header', index: i, field: 0 })}
                   className="form-input flex-1 text-xs" style={{ padding: '3px 6px', fontSize: 11 }} />
                 <input type="text" placeholder="值" value={v}
                   onChange={e => updateHeader(i, 1, e.target.value)}
+                  onFocus={trackField({ kind: 'header', index: i, field: 1 })}
                   className="form-input flex-1 text-xs" style={{ padding: '3px 6px', fontSize: 11 }} />
                 {i < tab.headers.length - 1 && (
                   <button onClick={() => removeHeader(i)}
@@ -1308,11 +1343,6 @@ export default function ApiTester({ onCreateRule, prefillRequest, prefillName, o
               ))}
               {tab.bodyType === 'raw' && (
                 <div className="ml-auto flex items-center gap-1.5">
-                  <DynamicVarMenu
-                    targetRef={bodyTaRef}
-                    value={tab.body}
-                    onInsert={next => updateBody(next)}
-                    label="在请求体插入动态变量（时间戳等）" />
                   <button onClick={() => setBodySearchOpen(o => !o)}
                     className={`btn-ghost p-1 ${bodySearchOpen ? 'text-primary-600' : ''}`}
                     aria-label="搜索请求体" data-tip="搜索关键字">
@@ -1374,6 +1404,7 @@ export default function ApiTester({ onCreateRule, prefillRequest, prefillName, o
               placeholder="请求体..."
               value={tab.body}
               onChange={e => updateBody(e.target.value)}
+              onFocus={trackField({ kind: 'body' })}
               rows={7}
               className="form-textarea w-full" style={{ fontSize: 11 }}
             />}
