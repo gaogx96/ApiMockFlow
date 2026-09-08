@@ -11,6 +11,9 @@ import { generateId } from '../../shared/constants';
 import { showToast, showConfirm } from '../../shared/toast';
 import { repairAndFormatJson, minifyJson } from '../../shared/json-format';
 import { parseJwtExpiry, humanizeDuration } from '../../shared/jwt';
+import { resolveDynamicVars, hasDynamicVars } from '../../shared/dynamic-vars';
+import { detectTimestamps, applyTimestamps, TsCandidate } from '../../shared/timestamp-detect';
+import DynamicVarMenu from '../components/DynamicVarMenu';
 import { kickCompositorPresent } from '../compositor';
 
 const METHODS = ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'HEAD', 'OPTIONS'];
@@ -149,6 +152,8 @@ export default function ApiTester({ onCreateRule, prefillRequest, prefillName, o
   const [importText, setImportText] = useState('');
   const [showImport, setShowImport] = useState(false);
   const [importedReqs, setImportedReqs] = useState<ApiRequest[]>([]);
+  // 导入时的时间戳检测-确认：命中固定时间戳时，先让用户勾选是否转成动态占位符
+  const [tsReview, setTsReview] = useState<{ req: ApiRequest; candidates: TsCandidate[]; selected: Set<string> } | null>(null);
   const [saveName, setSaveName] = useState('');
   const [showSaveDialog, setShowSaveDialog] = useState(false);
   // 保存对话框：所选分组（''=不分组）与就地新建分组的输入
@@ -274,6 +279,7 @@ export default function ApiTester({ onCreateRule, prefillRequest, prefillName, o
 
   // 关键字搜索：请求体（可编辑 textarea → 原生选区定位）与响应体（只读 → <mark> 高亮 + 滚动定位）
   const bodyTaRef = useRef<HTMLTextAreaElement>(null);
+  const urlInputRef = useRef<HTMLInputElement>(null);
   const [bodySearchOpen, setBodySearchOpen] = useState(false);
   const [bodyQuery, setBodyQuery] = useState('');
   const bodySearch = useTextareaSearch(bodyTaRef, tab?.body ?? '', bodySearchOpen ? bodyQuery : '');
@@ -551,7 +557,14 @@ export default function ApiTester({ onCreateRule, prefillRequest, prefillName, o
       else h['Content-Type'] = contentTypeFor(tab.bodyType);
     }
 
-    const req: ApiRequest = { method: tab.method, url: tab.url.trim(), headers: h, body: tab.body || undefined, bodyType: tab.bodyType as any };
+    // 发送时解析动态变量（{{$ts}} 等），使实际请求与历史记录都落地为当前时刻的字面值
+    const now = Date.now();
+    const rh: Record<string, string> = {};
+    for (const [k, v] of Object.entries(h)) rh[resolveDynamicVars(k, { now })] = resolveDynamicVars(v, { now });
+    const rUrl = resolveDynamicVars(tab.url.trim(), { now });
+    const rBody = tab.body ? resolveDynamicVars(tab.body, { now }) : undefined;
+
+    const req: ApiRequest = { method: tab.method, url: rUrl, headers: rh, body: rBody, bodyType: tab.bodyType as any };
     chrome.runtime.sendMessage({ type: 'API_TEST_REQUEST', payload: { ...req, refreshCookie: tab.autoRefreshCookie } }, (resp) => {
       updateTab('loading', false);
       const lastErr = chrome.runtime.lastError;
@@ -646,12 +659,36 @@ export default function ApiTester({ onCreateRule, prefillRequest, prefillName, o
         return;
       }
       result.requests[0].unsupported?.forEach(message => showToast(message, 'warning', 6000));
+      const candidates = detectTimestamps(result.requests[0]);
+      if (candidates.length > 0) {
+        // 命中固定时间戳：进入检测-确认，默认全选转为动态占位符
+        setTsReview({ req: result.requests[0], candidates, selected: new Set(candidates.map(c => c.id)) });
+        return;
+      }
       loadRequestToTab(result.requests[0]);
       setImportText('');
       setShowImport(false);
     } else {
       setImportedReqs(result.requests);
     }
+  }
+
+  function finishTsReview(applyDynamic: boolean) {
+    if (!tsReview) return;
+    const finalReq = applyDynamic ? applyTimestamps(tsReview.req, tsReview.candidates, tsReview.selected) : tsReview.req;
+    loadRequestToTab(finalReq);
+    setTsReview(null);
+    setImportText('');
+    setShowImport(false);
+  }
+
+  function toggleTsCandidate(id: string) {
+    setTsReview(prev => {
+      if (!prev) return prev;
+      const selected = new Set(prev.selected);
+      if (selected.has(id)) selected.delete(id); else selected.add(id);
+      return { ...prev, selected };
+    });
   }
 
   function importOneToNewTab(r: ApiRequest) {
@@ -881,19 +918,23 @@ export default function ApiTester({ onCreateRule, prefillRequest, prefillName, o
   }
 
   function requestToCurl(req: ApiRequest, includeSensitive = false): string {
-    const lines = [`curl ${shellQuote(req.url)}`, `  -X ${req.method}`];
+    // 复制为 cURL 时把动态变量解析成当前时刻的字面值（对已解析的历史记录为幂等无副作用）
+    const now = Date.now();
+    const rv = (s: string) => resolveDynamicVars(s, { now });
+    const lines = [`curl ${shellQuote(rv(req.url))}`, `  -X ${req.method}`];
     for (const [key, value] of Object.entries(req.headers)) {
       if (!key.trim()) continue;
       if (req.bodyType === 'multipart' && key.toLowerCase() === 'content-type') continue;
-      const safeValue = !includeSensitive && /^(authorization|cookie|x-api-key)$/i.test(key) ? '***' : value;
-      lines.push(`  -H ${shellQuote(`${key}: ${safeValue}`)}`);
+      const safeValue = !includeSensitive && /^(authorization|cookie|x-api-key)$/i.test(key) ? '***' : rv(value);
+      lines.push(`  -H ${shellQuote(`${rv(key)}: ${safeValue}`)}`);
     }
     if (req.body && !/^(GET|HEAD)$/i.test(req.method)) {
+      const body = rv(req.body);
       if (req.bodyType === 'multipart') {
-        const parts = readMultipart(req.body);
+        const parts = readMultipart(body);
         if (parts.length) parts.forEach(part => lines.push(`  --form-string ${shellQuote(`${part.name}=${part.value}`)}`));
-        else lines.push(`  --data-raw ${shellQuote(req.body)}`);
-      } else lines.push(`  --data-raw ${shellQuote(req.body)}`);
+        else lines.push(`  --data-raw ${shellQuote(body)}`);
+      } else lines.push(`  --data-raw ${shellQuote(body)}`);
     }
     return lines.join(' \\\n');
   }
@@ -1000,9 +1041,16 @@ export default function ApiTester({ onCreateRule, prefillRequest, prefillName, o
             options={METHODS.map(m => ({ value: m, label: m }))}
             ariaLabel="请求方法" className="shrink-0" style={{ width: 78, fontSize: 11 }} />
           <input type="text" placeholder="输入 URL..."
+            ref={urlInputRef}
             value={tab.url} onChange={e => { updateTab('url', e.target.value); syncQueryFromUrl(e.target.value); if (!tabs[activeIdx].name || tabs[activeIdx].name === '新请求') { const d = e.target.value.replace(/^https?:\/\//, '').split('/')[0]; if (d) updateTab('name', d); } }}
             onKeyDown={e => e.key === 'Enter' && sendRequest()}
             className="form-input flex-1 text-xs" style={{ minWidth: 0, padding: '4px 8px', fontSize: 11 }} />
+          <DynamicVarMenu
+            targetRef={urlInputRef}
+            value={tab.url}
+            onInsert={next => { updateTab('url', next); syncQueryFromUrl(next); }}
+            label="在 URL 插入动态变量（时间戳等）"
+            className="shrink-0" />
           <button onClick={sendRequest} disabled={tab.loading} className="btn-primary whitespace-nowrap">
             <Icon name="send" size={15} />{tab.loading ? '发送中...' : '发送'}
           </button>
@@ -1030,6 +1078,17 @@ export default function ApiTester({ onCreateRule, prefillRequest, prefillName, o
           </button>
         </div>
       </div>
+
+      {/* 动态变量预览：URL/请求体含 {{$ts}} 等占位符时，提示发送时的实际取值 */}
+      {(hasDynamicVars(tab.url) || hasDynamicVars(tab.body)) && (
+        <div className="px-2 py-1 border-b border-gray-100 dark:border-slate-700 bg-indigo-50/60 dark:bg-slate-900 shrink-0 flex items-center gap-1.5 text-[11px] text-indigo-600 dark:text-indigo-300 overflow-hidden">
+          <Icon name="zap" size={12} className="shrink-0" />
+          <span className="shrink-0 opacity-80">发送时解析为</span>
+          <code className="truncate" title={resolveDynamicVars(hasDynamicVars(tab.url) ? tab.url : tab.body)}>
+            {resolveDynamicVars(hasDynamicVars(tab.url) ? tab.url : tab.body)}
+          </code>
+        </div>
+      )}
 
       {tab.queryParams.length > 0 && (
         <div className="px-2 py-1.5 border-b border-gray-100 dark:border-slate-700 bg-gray-50 dark:bg-slate-900 shrink-0">
@@ -1093,9 +1152,37 @@ export default function ApiTester({ onCreateRule, prefillRequest, prefillName, o
           />
           <div className="flex gap-1.5 mb-1.5">
             <button onClick={handleImport} className="btn-primary">解析</button>
-            <button onClick={() => { setShowImport(false); setImportText(''); setImportedReqs([]); }}
+            <button onClick={() => { setShowImport(false); setImportText(''); setImportedReqs([]); setTsReview(null); }}
               className="btn-secondary">取消</button>
           </div>
+          {tsReview && (
+            <div className="bg-white dark:bg-slate-800 rounded border border-indigo-200 dark:border-indigo-800 mb-1.5">
+              <div className="px-2 py-1 border-b border-gray-100 dark:border-slate-700 bg-indigo-50/70 dark:bg-slate-900 flex items-center gap-1.5">
+                <Icon name="clock-3" size={13} className="text-indigo-500 shrink-0" />
+                <span className="text-xs text-indigo-700 dark:text-indigo-300">检测到 {tsReview.candidates.length} 处时间戳，勾选后将替换为动态占位符（发送时按当前时刻解析）</span>
+              </div>
+              <div className="max-h-32 overflow-y-auto">
+                {tsReview.candidates.map(c => (
+                  <label key={c.id}
+                    className="flex items-center gap-1.5 px-2 py-1 text-xs cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-800 border-b border-gray-50 dark:border-slate-700 last:border-0">
+                    <input type="checkbox" className="w-3 h-3 shrink-0"
+                      checked={tsReview.selected.has(c.id)}
+                      onChange={() => toggleTsCandidate(c.id)} />
+                    <span className="shrink-0 text-gray-400" style={{ minWidth: 68 }}>{c.label}</span>
+                    <code className="truncate text-gray-500" title={c.original}>{c.original}</code>
+                    <Icon name="chevron-right" size={11} className="shrink-0 text-gray-300" />
+                    <code className="shrink-0 text-indigo-600 dark:text-indigo-400">{c.token}</code>
+                  </label>
+                ))}
+              </div>
+              <div className="flex gap-1.5 px-2 py-1.5 border-t border-gray-100 dark:border-slate-700">
+                <button onClick={() => finishTsReview(true)} className="btn-primary" style={{ fontSize: 11 }}>
+                  应用并载入{tsReview.selected.size > 0 ? `（${tsReview.selected.size}）` : ''}
+                </button>
+                <button onClick={() => finishTsReview(false)} className="btn-secondary" style={{ fontSize: 11 }}>保持固定值载入</button>
+              </div>
+            </div>
+          )}
           {importedReqs.length > 0 && (
             <div className="bg-white dark:bg-slate-800 rounded border border-gray-200 dark:border-slate-700 max-h-24 overflow-y-auto">
               <div className="flex items-center justify-between px-2 py-1 border-b border-gray-100 dark:border-slate-700 bg-gray-50 dark:bg-slate-900">
@@ -1205,6 +1292,11 @@ export default function ApiTester({ onCreateRule, prefillRequest, prefillName, o
               ))}
               {tab.bodyType === 'raw' && (
                 <div className="ml-auto flex items-center gap-1.5">
+                  <DynamicVarMenu
+                    targetRef={bodyTaRef}
+                    value={tab.body}
+                    onInsert={next => updateBody(next)}
+                    label="在请求体插入动态变量（时间戳等）" />
                   <button onClick={() => setBodySearchOpen(o => !o)}
                     className={`btn-ghost p-1 ${bodySearchOpen ? 'text-primary-600' : ''}`}
                     aria-label="搜索请求体" data-tip="搜索关键字">
