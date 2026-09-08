@@ -131,6 +131,10 @@ export default function RuleEditor({ rule, groups, onSave, onCancel, onBack, pre
     return acts;
   };
   const [actions, setActions] = useState<Action[]>(initialActions);
+  // 动作行的稳定 key：动作对象本身无 id，用索引作 key 会在「从中间删除」时按位置复用组件实例，
+  // 使 BodyValueField 的内部搜索状态(open/query)串到相邻动作。维护一份与 actions 同步的稳定序号。
+  const actionKeySeq = useRef(actions.length);
+  const [actionKeys, setActionKeys] = useState<number[]>(() => actions.map((_, i) => i));
 
   const [showNewGroup, setShowNewGroup] = useState(false);
   const [newGroupName, setNewGroupName] = useState('');
@@ -155,8 +159,8 @@ export default function RuleEditor({ rule, groups, onSave, onCancel, onBack, pre
     setActions(newActions);
   };
 
-  const addAction = () => setActions([...actions, { ...DEFAULT_ACTION }]);
-  const removeAction = (index: number) => setActions(actions.filter((_, i) => i !== index));
+  const addAction = () => { setActions([...actions, { ...DEFAULT_ACTION }]); setActionKeys([...actionKeys, actionKeySeq.current++]); };
+  const removeAction = (index: number) => { setActions(actions.filter((_, i) => i !== index)); setActionKeys(actionKeys.filter((_, i) => i !== index)); };
 
   // 「设置请求体/响应体」的值：合法则美化；非法则尝试自动修复常见错误并填入，仍失败给带位置的提示
   const formatActionValue = (index: number) => {
@@ -498,7 +502,7 @@ export default function RuleEditor({ rule, groups, onSave, onCancel, onBack, pre
             {actions.map((action, i) => {
               const isReq = ['modifyRequestUrl','modifyRequestHeader','modifyRequestBody','redirect','cancel','delay','injectScript'].includes(action.type);
               return (
-              <div key={i} className="p-3 bg-gray-50 dark:bg-slate-900 rounded-lg border border-gray-100 dark:border-slate-700">
+              <div key={actionKeys[i] ?? i} className="p-3 bg-gray-50 dark:bg-slate-900 rounded-lg border border-gray-100 dark:border-slate-700">
                 <div className="flex items-center justify-between mb-2.5">
                   <div className="flex items-center gap-1.5">
                     <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${isReq ? 'bg-blue-400' : 'bg-green-400'}`} title={isReq ? '请求阶段' : '响应阶段'} />

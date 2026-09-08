@@ -719,7 +719,9 @@ if (window.__APII_INIT) { /* already injected */ } else { window.__APII_INIT = t
   function patchXHR() {
     if (XHR_PATCHED) return;
     XHR_PATCHED = true;
-    NATIVE_XHR.prototype.open = function (m, u) { this._xm = m; this._xu = u; this._xrh = {}; this._xb = undefined; this._xrm = false; return _XHR_open.apply(this, arguments); };
+    // 记录原始 async 标志（open 省略第三参时默认异步 → undefined !== false 为 true）；
+    // 供改写分支判断：同步 XHR 一旦要改 URL/请求头，代理只能异步执行，需告警。
+    NATIVE_XHR.prototype.open = function (m, u, async) { this._xm = m; this._xu = u; this._xrh = {}; this._xb = undefined; this._xrm = false; this._xa = async !== false; return _XHR_open.apply(this, arguments); };
     NATIVE_XHR.prototype.setRequestHeader = function (n, v) { this._xrh = this._xrh || {}; this._xrh[n] = v; return _XHR_setRH.apply(this, arguments); };
     NATIVE_XHR.prototype.send = function (body) {
       var self = this;
@@ -754,7 +756,13 @@ if (window.__APII_INIT) { /* already injected */ } else { window.__APII_INIT = t
         if (rm.cancelled) {
           try{Object.defineProperty(self,'status',{value:403,writable:true,configurable:true});Object.defineProperty(self,'statusText',{value:'Blocked',writable:true,configurable:true});Object.defineProperty(self,'responseText',{value:'',writable:true,configurable:true});Object.defineProperty(self,'response',{value:'',writable:true,configurable:true});Object.defineProperty(self,'readyState',{value:4,writable:true,configurable:true});}catch(_){}
           xhrLog(null, null, true);
-          setTimeout(function(){self.dispatchEvent(new Event('load'));},0);
+          // 与代理/超时分支一致补齐事件时序：现代 axios 只在 onloadend 结算，
+          // 且需先 readystatechange(4) 再 load，缺 loadend 会让被 cancel 的 XHR 在 axios 下永久挂起。
+          setTimeout(function(){
+            self.dispatchEvent(new Event('readystatechange'));
+            self.dispatchEvent(new Event('load'));
+            self.dispatchEvent(new Event('loadend'));
+          },0);
           return;
         }
         // 关键修复：self 上已带业务代码设好的原始请求头。XHR 的 setRequestHeader 对同名头是
@@ -763,6 +771,14 @@ if (window.__APII_INIT) { /* already injected */ } else { window.__APII_INIT = t
         var hdrChanged = hdrsChanged(orh, rm.headers);
 
         if (rm.url !== ou || hdrChanged) {
+          // 同步 XHR(open 第三参 false) + 需改写 URL/请求头：代理 XHR 只能异步收发，
+          // 调用方 send 后同步读取 status/response 将拿不到结果。记为已知限制并告警，
+          // 避免"静默返回空数据"。异步 XHR / fetch / 仅改响应或 body 的同步 XHR 均不受影响。
+          if (self._xa === false) {
+            var _syncWarn = '同步 XHR 命中"改写 URL/请求头"规则：改写只能异步执行，调用方同步读取 status/response 拿不到结果。请改用异步 XHR 或用 API Tester 重放。';
+            rm.warnings.push(_syncWarn);
+            console.warn('[ApiMockFlow] ' + _syncWarn);
+          }
           // 需要改 URL，或增/删/改请求头 → 用全新代理 XHR，请求头只干净地设一次
           // 代理 XHR 必须用原生方法收发，否则它命中的是被 patch 过的原型 → send 会重新进入拦截器，
           // 同一请求被再匹配、再在发送前记一条(不带响应)日志（表现为「一次调用两条：一条带响应一条不带」）。
@@ -779,6 +795,23 @@ if (window.__APII_INIT) { /* already injected */ } else { window.__APII_INIT = t
           try { if (self.responseType) px.responseType = self.responseType; } catch (_) {}
           var hk2 = Object.keys(rm.headers);
           for (var i3 = 0; i3 < hk2.length; i3++) { try { _XHR_setRH.call(px, hk2[i3], rm.headers[hk2[i3]]); } catch (_) {} }
+
+          // 传播 abort：self 从未真正发送，页面调用 self.abort() 只会中止空壳 self，
+          // 真实请求在代理 px 上仍会发出 → 取消语义失效（请求仍到达服务端，可能有副作用）。
+          // 桥接 self.abort → px.abort()。先置 _xrm 抢占，使 px.abort() 触发的 readystatechange(4)
+          // 被 onreadystatechange 的 _xrm 守卫忽略，不再误派发 load；随后按规范补 abort + loadend
+          // （self 未 send，原生 abort 不会自动派发这些）。
+          self.abort = function () {
+            if (self._xrm) { try { px.abort(); } catch (_) {} return; }
+            self._xrm = true;
+            try { px.abort(); } catch (_) {}
+            try { Object.defineProperty(self, 'status', { value: 0, writable: true, configurable: true }); } catch (_) {}
+            try { Object.defineProperty(self, 'readyState', { value: 4, writable: true, configurable: true }); } catch (_) {}
+            self.dispatchEvent(new Event('readystatechange'));
+            self.dispatchEvent(new Event('abort'));
+            self.dispatchEvent(new Event('loadend'));
+            xhrLog(null, null, false);
+          };
 
           // Timeout handler —— 置 _xrm 抢占，避免超时后 onreadystatechange(4) 再派发一个 status=0 的假 load
           px.ontimeout = function() {

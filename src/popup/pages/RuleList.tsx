@@ -332,7 +332,14 @@ function RuleList({ state, onRefresh, onEditRule }: Props) {
         }
         const confirmed = await showConfirm('导入将覆盖当前所有规则和分组，是否继续？');
         if (!confirmed) return;
-        await chrome.runtime.sendMessage({ type: 'IMPORT_RULES', payload: text });
+        const resp = await chrome.runtime.sendMessage({ type: 'IMPORT_RULES', payload: text });
+        if (resp && resp.success === false) {
+          showToast('导入失败：' + (resp.error || '数据校验未通过'), 'error');
+          return;
+        }
+        if (resp && resp.skipped > 0) {
+          showToast(`导入完成，已跳过 ${resp.skipped} 条不合规规则（正则超长/高回溯风险或字段缺失）`, 'warning');
+        }
         onRefresh();
       } catch {
         showToast('导入失败：无效的 JSON 文件', 'error');

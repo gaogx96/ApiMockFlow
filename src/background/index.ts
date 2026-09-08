@@ -42,6 +42,38 @@ interface Rule {
 
 interface RuleGroup { id: string; name: string; enabled: boolean; color: string; }
 
+// ===== 导入校验限额（放大 ReDoS / 配额耗尽 风险的入口，唯一的外部不可信输入通道）=====
+const IMPORT_MAX_RULES = 2000;
+const IMPORT_MAX_GROUPS = 500;
+const IMPORT_MAX_REGEX_LEN = 1000;
+const IMPORT_MATCH_TYPES = ['exact', 'contains', 'regex', 'domain'];
+
+// 保守启发式：识别最易触发灾难性回溯的结构。宁可误伤个别刁钻正则，
+// 也不让导入的规则把用户页面主线程卡死。覆盖三类：
+//   1) 量词套在「含量词的分组」上：(a+)+ (a*)* (.*x)+ (a+){2,} (a{1,}){2,}
+//   2) 分组含开区间量词 {n,}，外层再加量词
+//   3) 分组内交替再加外层量词：(a|a)* (a|ab)+ —— 重叠交替回溯
+function looksCatastrophic(src: string): boolean {
+  // 分组内含 +/*/{n,} 量词，外层再套 +/*/{n,}
+  if (/\((?=[^)]*[+*]|[^)]*\{\d+,\})[^)]*\)\s*(?:[+*]|\{\d+,?\d*\})/.test(src)) return true;
+  // 分组内含交替，外层再套 +/*/{n,}
+  if (/\([^)]*\|[^)]*\)\s*(?:[+*]|\{\d+,?\d*\})/.test(src)) return true;
+  return false;
+}
+
+// 校验单条规则的 match 是否可安全导入：url 必须是字符串、matchType 合法；
+// 正则还需长度受限、无高回溯结构、且能编译。返回 false 表示该规则应被丢弃。
+function isImportableMatch(m: any): boolean {
+  if (!m || typeof m.url !== 'string') return false;
+  if (m.matchType && IMPORT_MATCH_TYPES.indexOf(m.matchType) < 0) return false;
+  if (m.matchType === 'regex') {
+    if (m.url.length > IMPORT_MAX_REGEX_LEN) return false;
+    if (looksCatastrophic(m.url)) return false;
+    try { new RegExp(m.url); } catch { return false; }
+  }
+  return true;
+}
+
 // ===== Storage helpers =====
 function storageGet<T>(key: string, def: T): Promise<T> {
   return new Promise((r) => chrome.storage.local.get(key, (res) => r(res[key] !== undefined ? res[key] : def)));
@@ -312,9 +344,17 @@ async function getCookiesForUrl(url: string): Promise<chrome.cookies.Cookie[]> {
   const base = getBaseDomain(host);
   if (!base) return primary;
   const byDomain = (await new Promise<chrome.cookies.Cookie[]>((r) => chrome.cookies.getAll({ domain: base }, (c) => r(c || [])))) || [];
+  // getAll({domain}) 会返回注册域「及其所有子域」的 Cookie（含 admin.* 等兄弟子域）。
+  // 只保留作用域覆盖目标 host 的：域名等于 host、或 host 落在该 Cookie 域之下（父域兜底的本意）。
+  // 兄弟/无关子域（host 不在其域下）一律剔除，避免把 admin.example.com 的 Cookie 带到 api.example.com。
+  const hostLc = host.toLowerCase();
+  const scoped = byDomain.filter((c) => {
+    const d = (c.domain || '').replace(/^\./, '').toLowerCase();
+    return !!d && (hostLc === d || hostLc.endsWith('.' + d));
+  });
   // 按 name 合并，精确匹配（primary）覆盖父域兜底
   const map = new Map<string, chrome.cookies.Cookie>();
-  for (const c of byDomain) map.set(c.name, c);
+  for (const c of scoped) map.set(c.name, c);
   for (const c of primary) map.set(c.name, c);
   return [...map.values()];
 }
@@ -429,7 +469,29 @@ chrome.windows.onRemoved.addListener((closedId) => {
 let logWriteQueue: Promise<unknown> = Promise.resolve();
 let historyWriteQueue: Promise<unknown> = Promise.resolve();
 let observeWriteQueue: Promise<unknown> = Promise.resolve();
-const MAX_INTERCEPT_LOG_BYTES = 100 * 1024 * 1024;
+const MAX_INTERCEPT_LOG_BYTES = 32 * 1024 * 1024;
+// 单条日志的序列化上限。内容脚本全站注入，任意页面都能伪造 APII_LOG → LOG_SAVE
+// 投递任意大字符串。合法拦截日志由 interceptor 侧按 LOG_BODY_LIMIT 截断，正常远小于此；
+// 超限者判定为滥用/异常，直接拒收，避免一条超大 entry 撑爆存储或拖垮每次写入的 stringify。
+const MAX_LOG_ENTRY_BYTES = 16 * 1024 * 1024;
+
+// LOG_SAVE 落盘前的净化：只保留已知顶层字段（丢弃页面伪造的多余键），并做基本类型校验。
+// 不做敏感头脱敏（本工具为个人调试用途，需要保留完整头/体供复制排障）。
+const LOG_ENTRY_KEYS = new Set([
+  'id', 'timestamp', 'url', 'method', 'ruleIds', 'ruleNames',
+  'originalRequest', 'modifiedRequest', 'originalResponse', 'modifiedResponse',
+  'cancelled', 'delayed', 'delayMs', 'kind', 'resourceType', 'warnings',
+]);
+function sanitizeLogEntry(raw: any): any | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  // 必备字段类型校验（与内容脚本桥接处一致，纵深防御）
+  if (typeof raw.url !== 'string' || typeof raw.method !== 'string' || typeof raw.timestamp !== 'number') return null;
+  const out: Record<string, any> = {};
+  for (const k of LOG_ENTRY_KEYS) if (raw[k] !== undefined) out[k] = raw[k];
+  // 单条体积上限：超限直接丢弃（合法日志远小于此）
+  try { if (JSON.stringify(out).length * 2 > MAX_LOG_ENTRY_BYTES) return null; } catch { return null; }
+  return out;
+}
 
 const WEB_REQUEST_TYPE_MAP: Record<string, string> = {
   main_frame: 'document', sub_frame: 'document', script: 'script', stylesheet: 'stylesheet',
@@ -479,6 +541,9 @@ chrome.webRequest.onCompleted.addListener((details) => {
 }, { urls: ['<all_urls>'] }, ['responseHeaders']);
 
 chrome.runtime.onMessage.addListener((msg: any, _sender: any, sendResponse: any) => {
+  // 纵深防御：只处理本扩展自身（popup / 内容脚本）发来的消息。当前清单无
+  // externally_connectable，外部网页本就无法直连；此校验防止未来放开该配置时被动暴露。
+  if (_sender && _sender.id && _sender.id !== chrome.runtime.id) return;
   const t = msg.type;
 
   if (t === 'OPEN_PANEL') {
@@ -602,10 +667,22 @@ chrome.runtime.onMessage.addListener((msg: any, _sender: any, sendResponse: any)
         sendResponse({ success: false, error: '文件中没有找到规则或分组数据' });
         return true;
       }
+      // 条目/分组数量上限：拒绝海量导入耗尽 chrome.storage 配额（默认约 5MB）
+      if (Array.isArray(d.rules) && d.rules.length > IMPORT_MAX_RULES) {
+        sendResponse({ success: false, error: `规则条目过多（${d.rules.length} 条，上限 ${IMPORT_MAX_RULES}），已拒绝导入` });
+        return true;
+      }
+      if (Array.isArray(d.groups) && d.groups.length > IMPORT_MAX_GROUPS) {
+        sendResponse({ success: false, error: `分组过多（${d.groups.length} 个，上限 ${IMPORT_MAX_GROUPS}），已拒绝导入` });
+        return true;
+      }
       const ps: Promise<void>[] = [];
+      let skipped = 0;
       if (d.rules && Array.isArray(d.rules)) {
-        // Validate and sanitize rules
-        const validRules = d.rules.filter((r: any) => r && r.id && r.name && r.match && Array.isArray(r.actions));
+        // 基本字段校验 + match 合法性（含正则长度/高回溯结构/可编译性）校验
+        const shapeOk = d.rules.filter((r: any) => r && r.id && r.name && Array.isArray(r.actions));
+        const validRules = shapeOk.filter((r: any) => isImportableMatch(r.match));
+        skipped = d.rules.length - validRules.length;
         // Strip injectScript actions from imported rules for security
         for (const rule of validRules) {
           rule.actions = rule.actions.filter((a: any) => a && a.type && a.type !== 'injectScript');
@@ -616,7 +693,7 @@ chrome.runtime.onMessage.addListener((msg: any, _sender: any, sendResponse: any)
         const validGroups = d.groups.filter((g: any) => g && g.id && g.name);
         ps.push(storageSet('groups', validGroups));
       }
-      Promise.all(ps).then(() => sendResponse({ success: true }));
+      Promise.all(ps).then(() => sendResponse({ success: true, skipped }));
     } catch { sendResponse({ success: false, error: 'Invalid JSON' }); }
     return true;
   }
@@ -629,22 +706,23 @@ chrome.runtime.onMessage.addListener((msg: any, _sender: any, sendResponse: any)
       return false;
     }
     // SSRF protection: block private/internal IPs (unless user allows it)
-    function checkSSRF(): Promise<boolean> {
+    // 返回 { ok, allowInternal }：allowInternal 决定 fetch 是否可自动跟随重定向。
+    function checkSSRF(): Promise<{ ok: boolean; allowInternal: boolean }> {
       return storageGet<boolean>('allowInternalNetwork', false).then(allowInternal => {
-        if (allowInternal) return true; // user allowed, skip check
+        if (allowInternal) return { ok: true, allowInternal: true }; // user allowed, skip check
         try {
           const host = new URL(url).hostname;
           if (isBlockedHost(host)) {
             sendResponse({ error: '不允许访问内网地址（如需访问请点击盾牌图标放行内网）' });
-            return false;
+            return { ok: false, allowInternal: false };
           }
         } catch (_) {}
-        return true;
+        return { ok: true, allowInternal: false };
       });
     }
     const start = Date.now();
 
-    async function doRequest() {
+    async function doRequest(allowInternal: boolean) {
       const hdrs = new Headers(headers || {});
 
       // Attach / refresh browser cookies.
@@ -675,6 +753,11 @@ chrome.runtime.onMessage.addListener((msg: any, _sender: any, sendResponse: any)
       }
 
       const init: RequestInit = { method, headers: hdrs };
+      // 只对初始 URL 校验主机不足以防 SSRF：默认 redirect:'follow' 时，公网服务器可用
+      // 302 Location: http://169.254.169.254/ 之类把请求引到内网/云元数据且不再二次校验。
+      // 未放行内网时改用 'manual'——3xx 会得到 type==='opaqueredirect'（status 0、无头），
+      // 我们据此拒绝跟随并明确提示；放行内网时才允许自动跟随。
+      init.redirect = allowInternal ? 'follow' : 'manual';
       if (body && method !== 'GET' && method !== 'HEAD') {
         if (bodyType === 'urlencoded') {
           try { init.body = new URLSearchParams(body); }
@@ -698,6 +781,11 @@ chrome.runtime.onMessage.addListener((msg: any, _sender: any, sendResponse: any)
       try {
         const resp = await fetch(url, init);
         clearTimeout(tm);
+        // manual 模式下遇到 3xx：不暴露 Location、无法逐跳重校验，直接拒绝跟随。
+        if (resp.type === 'opaqueredirect') {
+          sendResponse({ error: '目标发生重定向，已出于 SSRF 防护阻止自动跟随（重定向目标未经内网校验）。如确需跟随，请点击盾牌图标放行内网后重试。', duration: Date.now() - start });
+          return;
+        }
         const contentLength = resp.headers.get('content-length');
         const respBody = await resp.text();
         const respHdrs: Record<string, string> = {};
@@ -715,7 +803,7 @@ chrome.runtime.onMessage.addListener((msg: any, _sender: any, sendResponse: any)
       }
     }
 
-    checkSSRF().then(ok => { if (ok) doRequest(); });
+    checkSSRF().then(({ ok, allowInternal }) => { if (ok) doRequest(allowInternal); });
     return true;
   }
 
@@ -785,11 +873,13 @@ chrome.runtime.onMessage.addListener((msg: any, _sender: any, sendResponse: any)
   // ---- Intercepted Request Log ----
   if (t === 'LOG_SAVE') {
     if (!msg.payload) { return false; }
+    const entry = sanitizeLogEntry(msg.payload);
+    if (!entry) { sendResponse({ ok: false }); return false; }
     // Serialize read-modify-write operations so near-simultaneous request/response
     // logs cannot overwrite each other in chrome.storage.
     logWriteQueue = logWriteQueue.then(async () => {
       const log = await storageGet<any[]>('interceptLog', []);
-      log.unshift(msg.payload);
+      log.unshift(entry);
       if (log.length > 200) log.length = 200;
       let bytes = 0;
       for (const item of log) bytes += JSON.stringify(item).length * 2;

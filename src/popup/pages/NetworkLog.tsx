@@ -134,6 +134,9 @@ export default function NetworkLog({ onCreateRule, observeEnabled, observeResour
         });
       });
       setLogs(remaining);
+      // 关弹窗那一刻 overlay.remove() 会在原地补发 mouseenter，把被清掉的行的 URL 卡片重新点亮；
+      // 与 setLogs 同批清空 tooltip，行随之卸载，残留卡片无处依附。
+      setUrlTooltip(null);
       // 徽标计数按全量统计，仅在两类都清空后才归零；否则交给 App 的 2s 轮询自愈。
       if (remaining.length === 0) onClear();
     } catch (_) {
