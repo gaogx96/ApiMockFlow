@@ -219,9 +219,10 @@ export default function NetworkLog({ onCreateRule, observeEnabled, observeResour
   const hasDiff = (log: InterceptedRequest) => {
     if (log.cancelled) return true;
     if (log.originalResponse && log.modifiedResponse) {
+      const modH = reconcileRespTransportHeaders(log.originalResponse.headers, log.modifiedResponse.headers).headers;
       return log.originalResponse.status !== log.modifiedResponse.status ||
         log.originalResponse.body !== log.modifiedResponse.body ||
-        headersChanged(log.originalResponse.headers, log.modifiedResponse.headers);
+        headersChanged(log.originalResponse.headers, modH);
     }
     return log.modifiedRequest.url !== log.url ||
       headersChanged(log.modifiedRequest.headers, log.originalRequest.headers) ||
@@ -237,7 +238,7 @@ export default function NetworkLog({ onCreateRule, observeEnabled, observeResour
     log.originalResponse && log.modifiedResponse && (
       log.originalResponse.status !== log.modifiedResponse.status ||
       log.originalResponse.body !== log.modifiedResponse.body ||
-      headersChanged(log.originalResponse.headers, log.modifiedResponse.headers)
+      headersChanged(log.originalResponse.headers, reconcileRespTransportHeaders(log.originalResponse.headers, log.modifiedResponse.headers).headers)
     )
   );
 
@@ -584,20 +585,23 @@ export default function NetworkLog({ onCreateRule, observeEnabled, observeResour
                       )}
 
                       {/* 响应：有改写时做前后 diff；仅改请求（或纯观察）时也要展示接口实际响应 */}
-                      {log.originalResponse && (
-                        log.modifiedResponse
-                          ? renderDiff(
-                              '响应',
-                              `${log.originalResponse.status} ${log.originalResponse.statusText}\n${formatHeaders(log.originalResponse.headers)}\n\n${log.originalResponse.body || ''}`,
-                              `${log.modifiedResponse.status} ${log.modifiedResponse.statusText}\n${formatHeaders(log.modifiedResponse.headers)}\n\n${log.modifiedResponse.body || ''}`,
-                              sc
-                            )
-                          : renderSingle(
-                              '响应',
-                              `${log.originalResponse.status} ${log.originalResponse.statusText}\n${formatHeaders(log.originalResponse.headers)}\n\n${log.originalResponse.body || ''}`,
-                              sc
-                            )
-                      )}
+                      {log.originalResponse && (() => {
+                        const rs = respStrings(log);
+                        const reconciled = !!(log.modifiedResponse &&
+                          reconcileRespTransportHeaders(log.originalResponse.headers, log.modifiedResponse.headers).reconciled);
+                        return (
+                          <>
+                            {log.modifiedResponse
+                              ? renderDiff('响应', rs.orig as string, rs.mod as string, sc)
+                              : renderSingle('响应', rs.orig as string, sc)}
+                            {reconciled && (
+                              <div className="text-[11px] text-gray-400 dark:text-gray-500 leading-relaxed px-0.5">
+                                ⓘ content-encoding / content-length 由扩展解码并重建响应时自动规整，非规则改动；页面实际收到的是解码后内容。
+                              </div>
+                            )}
+                          </>
+                        );
+                      })()}
 
                       {log.cancelled && (
                         <div className="text-xs text-red-500 bg-red-50 dark:bg-red-900/20 p-2 rounded">
@@ -643,6 +647,28 @@ function formatHeaders(headers: Record<string, string>): string {
   return Object.entries(headers).map(([k, v]) => `${k}: ${v}`).join('\n');
 }
 
+// content-encoding / content-length：扩展解码并重建响应时会按解码后内容自动剥离（见 interceptor.js
+// deleteHeaderCI），这属传输层规整、并非规则改动。若原样进 diff，会在响应「原始」列冒出两条假的
+// 红色「已删除」行，误导为"响应被改"。此处把「原始有、修改后被剥离」的传输头按原值补回修改后快照，
+// 使其在比较 / 渲染 / 复制中两侧一致、不高亮；是否发生过规整单独返回，供渲染层加脚注说明。
+const TRANSPORT_HEADERS = new Set(['content-encoding', 'content-length']);
+function reconcileRespTransportHeaders(
+  orig: Record<string, string>,
+  mod: Record<string, string>,
+): { headers: Record<string, string>; reconciled: boolean } {
+  const modKeysLower = new Set(Object.keys(mod).map((k) => k.toLowerCase()));
+  const out: Record<string, string> = { ...mod };
+  let reconciled = false;
+  for (const k of Object.keys(orig)) {
+    const lk = k.toLowerCase();
+    if (TRANSPORT_HEADERS.has(lk) && !modKeysLower.has(lk)) {
+      out[k] = orig[k];
+      reconciled = true;
+    }
+  }
+  return { headers: out, reconciled };
+}
+
 // 请求/响应文本串构造（渲染与搜索计数共用同一来源，避免漂移）
 function reqStrings(log: InterceptedRequest) {
   return {
@@ -651,9 +677,12 @@ function reqStrings(log: InterceptedRequest) {
   };
 }
 function respStrings(log: InterceptedRequest) {
+  const modHeaders = log.originalResponse && log.modifiedResponse
+    ? reconcileRespTransportHeaders(log.originalResponse.headers, log.modifiedResponse.headers).headers
+    : log.modifiedResponse?.headers;
   return {
     orig: log.originalResponse ? `${log.originalResponse.status} ${log.originalResponse.statusText}\n${formatHeaders(log.originalResponse.headers)}\n\n${log.originalResponse.body || ''}` : null,
-    mod: log.modifiedResponse ? `${log.modifiedResponse.status} ${log.modifiedResponse.statusText}\n${formatHeaders(log.modifiedResponse.headers)}\n\n${log.modifiedResponse.body || ''}` : null,
+    mod: log.modifiedResponse ? `${log.modifiedResponse.status} ${log.modifiedResponse.statusText}\n${formatHeaders(modHeaders as Record<string, string>)}\n\n${log.modifiedResponse.body || ''}` : null,
   };
 }
 // 展开详情内按 DOM 渲染顺序枚举可搜索文本段（changed diff 按行拆分，其余整段），供全局命中计数
