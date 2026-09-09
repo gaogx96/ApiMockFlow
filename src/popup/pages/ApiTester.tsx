@@ -1138,7 +1138,7 @@ export default function ApiTester({ onCreateRule, prefillRequest, prefillName, o
             <Icon name="clipboard-paste" size={16} />
           </button>
           {/* 更多：低频项收进溢出菜单，向下展开、右对齐，避免工具栏拥挤 */}
-          <div className="relative shrink-0" ref={moreMenuRef}>
+          <div className="relative shrink-0 flex items-center" ref={moreMenuRef}>
             <button onClick={() => setMoreOpen(o => !o)}
               className={`btn-ghost ${moreOpen ? 'text-primary-600' : ''}`}
               aria-label="更多（内网放行 / 插入时间戳）"
@@ -1148,35 +1148,37 @@ export default function ApiTester({ onCreateRule, prefillRequest, prefillName, o
               <Icon name="ellipsis" size={16} />
             </button>
             {moreOpen && (
-              <div className="settings-menu" role="menu" style={{ minWidth: 244 }}>
+              <div className="settings-menu" role="menu" style={{ minWidth: 184, padding: 4 }}>
                 <button className="menu-item" role="menuitem" onClick={toggleAllowInternal}
-                  aria-label={allowInternal ? '允许访问内网地址（点击关闭）' : '内网地址已拦截（点击放行）'}>
+                  aria-label={allowInternal ? '允许访问内网地址（点击关闭）' : '内网地址已拦截（点击放行）'}
+                  style={{ padding: '8px 9px', gap: 8 }}>
                   <Icon name={allowInternal ? 'shield-check' : 'shield-alert'} size={16}
-                    className={allowInternal ? 'text-green-600 dark:text-green-400' : 'text-amber-500 dark:text-amber-400'} />
-                  <span className="flex-1">内网地址访问</span>
-                  <span style={{ fontSize: 11, fontWeight: 600 }}
-                    className={allowInternal ? 'text-green-600 dark:text-green-400' : 'text-gray-400 dark:text-slate-500'}>
+                    className={allowInternal ? 'text-green-600 dark:text-green-400' : 'text-gray-400 dark:text-slate-500'} />
+                  <span className="flex-1" style={{ fontSize: 11 }}>内网访问</span>
+                  <span style={{ fontSize: 10, color: allowInternal ? 'var(--success, #16a05d)' : 'var(--text3, #9aa1aa)' }}>
                     {allowInternal ? '已放行' : '已拦截'}
                   </span>
                 </button>
-                <div style={{ height: 1, background: 'var(--border)', margin: '4px 6px' }} />
-                <div style={{ padding: '2px 10px 4px', fontSize: 11, color: 'var(--text2)', fontWeight: 600 }}>插入时间戳（光标处）</div>
-                {DYNAMIC_VAR_TOKENS.map((t) => {
-                  const preview = resolveDynamicVars(t.insert);
-                  return (
-                    <button key={t.name} className="menu-item" role="menuitem"
-                      style={{ flexDirection: 'column', alignItems: 'stretch', gap: 2 }}
-                      onClick={() => { insertDynamicVar(t.insert); setMoreOpen(false); }}>
-                      <span className="flex items-center justify-between gap-2">
-                        <code style={{ fontSize: 11.5, color: 'var(--accent-fg, #4f46e5)' }}>{t.insert}</code>
-                        <span style={{ fontSize: 11, color: 'var(--text2)' }}>{t.label}</span>
-                      </span>
-                      <span style={{ fontSize: 10.5, color: 'var(--text3, var(--text2))', opacity: 0.8, wordBreak: 'break-all' }}>= {preview}</span>
-                    </button>
-                  );
-                })}
-                <div style={{ padding: '4px 10px 2px', fontSize: 10, color: 'var(--text2)', opacity: 0.75, lineHeight: 1.4 }}>
-                  插到光标所在字段（URL / 参数 / 请求头 / 请求体）；支持秒级偏移，如 <code>{'{{$ts+30}}'}</code>、<code>{'{{$ts-60}}'}</code>；发送时按当前时刻解析
+                <div className="relative group">
+                  <div className="menu-item" role="menuitem" tabIndex={0}
+                    style={{ padding: '8px 9px', gap: 8, cursor: 'default' }}>
+                    <Icon name="plus" size={15} className="text-indigo-500" />
+                    <span className="flex-1" style={{ fontSize: 11 }}>时间戳</span>
+                    <span style={{ fontSize: 12, color: 'var(--text3, #9aa1aa)' }}>›</span>
+                  </div>
+                  <div className="hidden group-hover:block group-focus-within:block absolute right-full top-0 mr-1 z-20"
+                    role="menu" style={{ width: 158 }}>
+                    <div className="settings-menu" style={{ padding: 4 }}>
+                      {DYNAMIC_VAR_TOKENS.map((t) => (
+                        <button key={t.name} className="menu-item" role="menuitem"
+                          style={{ padding: '8px 9px', gap: 7 }}
+                          onClick={() => { insertDynamicVar(t.insert); setMoreOpen(false); }}>
+                          <code style={{ fontSize: 10.5, color: 'var(--accent-fg, #4f46e5)' }}>{t.insert}</code>
+                          <span className="flex-1 text-right" style={{ fontSize: 10, color: 'var(--text2)' }}>{t.label.replace('时间戳', '').replace('（', '').replace('）', '')}</span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
                 </div>
               </div>
             )}
@@ -1186,10 +1188,9 @@ export default function ApiTester({ onCreateRule, prefillRequest, prefillName, o
 
       {/* 动态变量预览：URL/请求体含 {{$ts}} 等占位符时，提示发送时的实际取值 */}
       {(hasDynamicVars(tab.url) || hasDynamicVars(tab.body)) && (
-        <div className="px-2 py-1 border-b border-gray-100 dark:border-slate-700 bg-indigo-50/60 dark:bg-slate-900 shrink-0 flex items-center gap-1.5 text-[11px] text-indigo-600 dark:text-indigo-300 overflow-hidden">
-          <Icon name="zap" size={12} className="shrink-0" />
+        <div className="px-2 py-1 border-b border-gray-100 dark:border-slate-700 bg-indigo-50/60 dark:bg-slate-900 shrink-0 flex items-center gap-1.5 text-[11px] text-indigo-600 dark:text-indigo-300 overflow-hidden" aria-label="动态时间戳预览" data-tip-placement="below" data-tip={resolveDynamicVars(hasDynamicVars(tab.url) ? tab.url : tab.body)}>
           <span className="shrink-0 opacity-80">发送时解析为</span>
-          <code className="truncate" title={resolveDynamicVars(hasDynamicVars(tab.url) ? tab.url : tab.body)}>
+          <code className="truncate">
             {resolveDynamicVars(hasDynamicVars(tab.url) ? tab.url : tab.body)}
           </code>
         </div>

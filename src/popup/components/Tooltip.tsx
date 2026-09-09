@@ -24,8 +24,10 @@ export default function Tooltip() {
       if (!text) return;
       const rect = el.getBoundingClientRect();
       const center = Math.round(rect.left + rect.width / 2); // 居中对准图标；贴边时由 layoutEffect 微调
+      // 个别内容预览需要向下展开，避免遮挡紧邻其上的工具栏。
+      if (el.getAttribute('data-tip-placement') === 'below') setTip({ text, left: center, top: Math.round(rect.bottom + 8) });
       // 元素在上半屏 → 提示放下方，否则放上方，尽量不出界
-      if (rect.top < 48) setTip({ text, left: center, top: Math.round(rect.bottom + 8) });
+      else if (rect.top < 48) setTip({ text, left: center, top: Math.round(rect.bottom + 8) });
       else setTip({ text, left: center, bottom: Math.round(window.innerHeight - rect.top + 8) });
     };
 
