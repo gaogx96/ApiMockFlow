@@ -262,12 +262,14 @@ export default function NetworkLog({ onCreateRule, observeEnabled, observeResour
   );
 
   // 行级 Diff：高亮具体的变更行，而非整块着色
-  const renderDiff = (label: string, orig: string, mod: string, sc: SearchCtx) => {
+  // note：可选说明，紧贴标签下方渲染（如响应传输头自动规整脚注），避免用户滚到最底才看到
+  const renderDiff = (label: string, orig: string, mod: string, sc: SearchCtx, note?: React.ReactNode) => {
     const changed = orig !== mod;
     if (!changed) {
       return (
         <div className="space-y-1">
           <div className="text-xs font-semibold text-gray-500 uppercase">{label}</div>
+          {note}
           <div className="text-xs p-2 rounded font-mono whitespace-pre-wrap break-all bg-gray-50 dark:bg-slate-900 border border-gray-200 dark:border-slate-700">
             <div className="text-xs text-gray-400 mb-1">原始 = 修改后（无变更）</div>
             {hl(orig, sc, orig || <span className="text-gray-300">无</span>)}
@@ -284,6 +286,7 @@ export default function NetworkLog({ onCreateRule, observeEnabled, observeResour
     return (
       <div className="space-y-1">
         <div className="text-xs font-semibold text-gray-500 uppercase flex items-center gap-1"><Icon name="git-compare-arrows" size={14} className="text-gray-400" aria-label="修改前后对比" />{label} <span className="text-red-500">(已修改)</span></div>
+        {note}
         <div className="grid grid-cols-2 gap-2">
           <div className="text-xs p-2 rounded font-mono whitespace-pre-wrap break-all bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800">
             <div className="text-xs text-gray-400 mb-1">原始</div>
@@ -589,18 +592,14 @@ export default function NetworkLog({ onCreateRule, observeEnabled, observeResour
                         const rs = respStrings(log);
                         const reconciled = !!(log.modifiedResponse &&
                           reconcileRespTransportHeaders(log.originalResponse.headers, log.modifiedResponse.headers).reconciled);
-                        return (
-                          <>
-                            {log.modifiedResponse
-                              ? renderDiff('响应', rs.orig as string, rs.mod as string, sc)
-                              : renderSingle('响应', rs.orig as string, sc)}
-                            {reconciled && (
-                              <div className="text-[11px] text-gray-400 dark:text-gray-500 leading-relaxed px-0.5">
-                                ⓘ content-encoding / content-length 由扩展解码并重建响应时自动规整，非规则改动；页面实际收到的是解码后内容。
-                              </div>
-                            )}
-                          </>
-                        );
+                        const note = reconciled ? (
+                          <div className="text-[11px] text-gray-400 dark:text-gray-500 leading-relaxed px-0.5">
+                            ⓘ content-encoding / content-length 由扩展解码并重建响应时自动规整，非规则改动；页面实际收到的是解码后内容。
+                          </div>
+                        ) : undefined;
+                        return log.modifiedResponse
+                          ? renderDiff('响应', rs.orig as string, rs.mod as string, sc, note)
+                          : renderSingle('响应', rs.orig as string, sc);
                       })()}
 
                       {log.cancelled && (
