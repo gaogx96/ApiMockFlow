@@ -168,6 +168,7 @@ export default function App() {
 
   const handleEditRule = useCallback((rule: Rule | null) => {
     setEditingRule(rule);
+    setCreateRuleContext(null);
     setPrefillMatch(null);
     setEditorNonce(n => n + 1);
     setPage('editor');
@@ -175,6 +176,7 @@ export default function App() {
 
   const handleCreateFromLog = (prefill: Partial<RuleMatch>) => {
     setEditingRule(null);
+    setCreateRuleContext(null);
     setPrefillMatch(prefill);
     setEditorNonce(n => n + 1);
     setPage('editor');
@@ -190,6 +192,7 @@ export default function App() {
 
   const handleSaveRule = () => {
     refreshState();
+    setCreateRuleContext(null);
     setPrefillMatch(null);
     setPage('list');
   };
@@ -309,6 +312,7 @@ export default function App() {
         )}
         {page === 'apitest' && <ApiTester prefillRequest={prefillRequest} prefillName={prefillRequestName} autoSend={autoReplay} onPrefillConsumed={() => { setPrefillRequest(null); setAutoReplay(false); }} onCreateRule={(prefill) => {
           setEditingRule(null);
+          setCreateRuleContext(null);
           setPrefillMatch({ url: prefill.url, matchType: 'contains', method: prefill.method, resourceType: '' });
           setEditorNonce(n => n + 1);
           setPage('editor');

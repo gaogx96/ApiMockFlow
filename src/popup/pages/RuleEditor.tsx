@@ -98,7 +98,10 @@ export default function RuleEditor({ rule, groups, onSave, onCancel, onBack, pre
     method: contextLog?.method || prefill?.method || '', resourceType: contextLog?.resourceType || prefill?.resourceType || '',
   });
   const initialActions = (): Action[] => {
-    if (!createContext || !contextLog) return rule?.actions || [{ ...DEFAULT_ACTION }];
+    // 编辑已存规则时永远回显 rule.actions —— createContext 可能是会话内残留的旧日志，
+    // 若让它优先会用旧日志重建 URL/Header/Body，盖掉用户已保存的删改（见回归 bug）。
+    if (rule) return rule.actions;
+    if (!createContext || !contextLog) return [{ ...DEFAULT_ACTION }];
     if (createContext.mode === 'response') {
       const response = contextLog.modifiedResponse || contextLog.originalResponse;
       const acts: Action[] = [];
