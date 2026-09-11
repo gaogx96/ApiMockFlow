@@ -171,13 +171,16 @@ export default function ApiTester({ onCreateRule, prefillRequest, prefillName, o
   const [syncingCookie, setSyncingCookie] = useState(false);
   const [showWhitelist, setShowWhitelist] = useState(false);
   const [whitelist, setWhitelist] = useState<string[]>([]);
-  const [whitelistInput, setWhitelistInput] = useState('');
+  // 「已打开过的网站」实时快照：白名单从这里勾选，而非手填（见 loadOpenedSites）。
+  const [openedSites, setOpenedSites] = useState<string[]>([]);
   const tabScrollRef = useRef<HTMLDivElement>(null);
 
   // 条件挂载的对话框（保存/导入/白名单）在弹窗被判后台时会出现"已点取消/保存、对话框却
   // 延迟数秒才消失"的推迟呈现（合成器节流出帧，详见 compositor.ts）。开关任一对话框都
   // 踢一下合成器，强制连续出帧把被推迟的那帧顶上屏。
   useEffect(() => { kickCompositorPresent(); }, [showSaveDialog, showImport, showWhitelist]);
+  // 打开白名单面板时刷新「已打开过的网站」清单（新开的标签自动出现在可选项里）。
+  useEffect(() => { if (showWhitelist) loadOpenedSites(); }, [showWhitelist]);
   const hydratedRef = useRef(false);
   const persistTimerRef = useRef<number | null>(null);
   // 待处理的 prefill 标签：水合(异步读回持久化标签)未完成时暂存于此，
@@ -596,14 +599,27 @@ export default function ApiTester({ onCreateRule, prefillRequest, prefillName, o
     setWhitelist(list);
     chrome.storage.local.set({ authCaptureWhitelist: list });
   }
-  function addWhitelist() {
-    const d = cleanDomain(whitelistInput);
-    setWhitelistInput('');
-    if (!d || whitelist.includes(d)) return;
-    saveWhitelist([...whitelist, d]);
+  // 枚举当前所有标签页，取 http(s) 站点的域名作为可勾选项（无需 tabs 权限，
+  // <all_urls> host_permission 即可读到 tab.url）。这就是「已打开过的网站」实时快照。
+  function loadOpenedSites() {
+    try {
+      chrome.tabs.query({}, (tabs) => {
+        if (chrome.runtime.lastError) return; // 读不到就保持空清单，不打扰
+        const set = new Set<string>();
+        for (const t of tabs) {
+          const u = t.url || '';
+          if (!/^https?:\/\//i.test(u)) continue; // 过滤 chrome://、扩展页、about: 等
+          const d = cleanDomain(u);
+          if (d) set.add(d);
+        }
+        setOpenedSites([...set].sort());
+      });
+    } catch { /* tabs 不可用则保持空清单 */ }
   }
-  function removeWhitelist(d: string) {
-    saveWhitelist(whitelist.filter(x => x !== d));
+  // 勾选=加入白名单，取消勾选=移出；清空回到「抓全部」（后端 authCaptureWhitelist 空=全站）。
+  function toggleSite(d: string) {
+    if (whitelist.includes(d)) saveWhitelist(whitelist.filter(x => x !== d));
+    else saveWhitelist([...whitelist, d]);
   }
 
   async function sendRequest() {
@@ -1344,28 +1360,51 @@ export default function ApiTester({ onCreateRule, prefillRequest, prefillName, o
             </div>
             {showWhitelist && (
               <div className="mb-1.5 p-2 rounded-md border border-gray-200 dark:border-slate-700 bg-gray-50 dark:bg-slate-900">
+                <div className="flex items-center gap-1 mb-1.5">
+                  <span className="text-xs text-gray-600 dark:text-gray-300 font-medium" style={{ fontSize: 11 }}>从已打开的网站中选择</span>
+                  <button onClick={loadOpenedSites}
+                    className="ml-auto inline-flex items-center gap-1 px-1.5 py-0.5 text-xs text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200"
+                    title="重新读取当前已打开的网站">
+                    <Icon name="refresh-cw" size={12} />刷新
+                  </button>
+                </div>
                 <div className="text-xs text-gray-500 mb-1.5" style={{ fontSize: 10, lineHeight: 1.5 }}>
-                  留空 = 抓取所有站点的登录态；填写后仅监听这些域名（含子域），可减少后台开销与隐私足迹。
+                  一个都不勾 = 抓取所有站点的登录态；勾选后仅监听所选域名（含子域），可减少后台开销与隐私足迹。
                 </div>
-                <div className="flex gap-1 mb-1.5">
-                  <input value={whitelistInput} onChange={e => setWhitelistInput(e.target.value)}
-                    onKeyDown={e => { if (e.key === 'Enter') addWhitelist(); }}
-                    placeholder="如 example.com"
-                    className="form-input flex-1 text-xs" style={{ padding: '3px 6px', fontSize: 11 }} />
-                  <button onClick={addWhitelist} className="btn-primary whitespace-nowrap">添加</button>
+                {(() => {
+                  const sites = [...new Set([...openedSites, ...whitelist])].sort();
+                  if (sites.length === 0) {
+                    return (
+                      <div className="text-xs text-gray-400" style={{ fontSize: 10 }}>
+                        未发现已打开的 http(s) 网站，去打开要监听的系统后点「刷新」。
+                      </div>
+                    );
+                  }
+                  return (
+                    <div className="flex flex-col gap-0.5 max-h-40 overflow-auto">
+                      {sites.map(d => {
+                        const checked = whitelist.includes(d);
+                        return (
+                          <button key={d} onClick={() => toggleSite(d)}
+                            className="flex items-center gap-1.5 px-1.5 py-1 rounded text-left hover:bg-white dark:hover:bg-slate-800"
+                            role="checkbox" aria-checked={checked} title={checked ? '取消监听该站点' : '仅监听该站点'}>
+                            <span className={`inline-flex items-center justify-center w-3.5 h-3.5 rounded-sm border shrink-0 ${
+                              checked
+                                ? 'bg-primary-500 border-primary-500 text-white'
+                                : 'border-gray-300 dark:border-slate-600'
+                            }`}>
+                              {checked && <Icon name="check" size={10} />}
+                            </span>
+                            <span className="text-xs truncate" style={{ fontSize: 11 }}>{d}</span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  );
+                })()}
+                <div className="text-xs text-gray-400 mt-1.5" style={{ fontSize: 10 }}>
+                  {whitelist.length === 0 ? '（当前：抓取所有站点）' : `（当前：仅抓 ${whitelist.length} 个所选站点）`}
                 </div>
-                {whitelist.length === 0 ? (
-                  <div className="text-xs text-gray-400" style={{ fontSize: 10 }}>（当前：抓取所有站点）</div>
-                ) : (
-                  <div className="flex flex-wrap gap-1">
-                    {whitelist.map(d => (
-                      <span key={d} className="inline-flex items-center gap-1 px-1.5 py-0.5 text-xs bg-white dark:bg-slate-800 border border-gray-200 dark:border-slate-700 rounded" style={{ fontSize: 10 }}>
-                        {d}
-                        <Icon name="x" size={12} className="text-gray-400 hover:text-gray-600 cursor-pointer" aria-label="移除白名单域名" onClick={() => removeWhitelist(d)} />
-                      </span>
-                    ))}
-                  </div>
-                )}
               </div>
             )}
             {tab.headers.map(([k, v], i) => (
