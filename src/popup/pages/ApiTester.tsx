@@ -1012,6 +1012,11 @@ export default function ApiTester({ onCreateRule, prefillRequest, prefillName, o
         </div>
       </div>
 
+      {/* URL 栏以下整体纳入一个纵向滚动容器：动态预览 / query / save / 导入面板 / 功能栏(TabStrip) /
+          请求头体响应内容都在其中。HAR 导入等面板撑高时可整页向下滚动，把导入面板与功能栏一并上移，
+          露出下方请求头/体/响应内容。Tab Bar 与 URL 栏保持顶部固定（最高频操作常驻可见）。 */}
+      <div className="flex-1 overflow-y-auto">
+
       {/* 动态变量预览：URL/请求体含 {{$ts}} 等占位符时，提示发送时的实际取值 */}
       {(hasDynamicVars(tab.url) || hasDynamicVars(tab.body)) && (
         <div className="px-2 py-1 border-b border-gray-100 dark:border-slate-700 bg-indigo-50/60 dark:bg-slate-900 shrink-0 flex items-center gap-1.5 text-[11px] text-indigo-600 dark:text-indigo-300 overflow-hidden" aria-label="动态时间戳预览" data-tip-placement="below" data-tip={resolveDynamicVars(hasDynamicVars(tab.url) ? tab.url : tab.body)}>
@@ -1151,8 +1156,8 @@ export default function ApiTester({ onCreateRule, prefillRequest, prefillName, o
         onChange={(key) => updateTab('activeSubTab', key as any)}
       />
 
-      {/* Content */}
-      <div className="flex-1 overflow-y-auto">
+      {/* Content：自然高度，随外层滚动容器整体滚动（不再自身内部滚动） */}
+      <div>
         {tab.activeSubTab === 'headers' && (
           <div className="p-2 space-y-1">
             <div className="flex items-center gap-2 mb-1.5 pb-1.5 border-b border-gray-100 dark:border-slate-700">
@@ -1560,6 +1565,7 @@ export default function ApiTester({ onCreateRule, prefillRequest, prefillName, o
             })()}
           </div>
         )}
+      </div>
       </div>
     </div>
   );
