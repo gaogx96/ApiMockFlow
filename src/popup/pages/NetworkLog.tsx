@@ -40,6 +40,13 @@ export default function NetworkLog({ onCreateRule, observeEnabled, observeResour
   const [createLog, setCreateLog] = useState<InterceptedRequest | null>(null);
   const invalidatedRef = useRef(false); // 上下文失效只提示一次
   const refreshHydratedRef = useRef(false); // 自动刷新状态水合完成前不回写，避免默认值覆盖已存偏好
+  // 实时刷新去抖 + 防重入：高流量下 interceptLogRev 每秒递增数十次。若每次都 LOG_GET 全量拉取
+  // （后台全表游标扫描 → 最多 200 条 / 32MB 经消息结构化克隆 → 整表重渲染），会打满弹窗主线程，
+  // 独立窗口尤甚（常驻承压 → 表现为「不刷新，切 tab 再切回才更新」）。这里把突发合并成最多每
+  // ~350ms 一次，且同一时刻只允许一次 LOG_GET 在途（在途期间的新信号收尾再补拉一次，保证最终一致）。
+  const fetchInFlightRef = useRef(false);
+  const fetchQueuedRef = useRef(false);
+  const refreshTimerRef = useRef<number | undefined>(undefined);
 
   // 展开详情内的关键字搜索（同一时刻只展开一条日志，故搜索态挂在组件级即可）
   const [bodySearchOpen, setBodySearchOpen] = useState(false);
@@ -60,7 +67,10 @@ export default function NetworkLog({ onCreateRule, observeEnabled, observeResour
   }, [matchIndex, bodyQuery, expandedId]);
 
   const fetchLogs = () => {
+    if (fetchInFlightRef.current) { fetchQueuedRef.current = true; return; } // 已有一次在途，合并到收尾补拉
+    fetchInFlightRef.current = true;
     chrome.runtime.sendMessage({ type: 'LOG_GET' }, (res) => {
+      fetchInFlightRef.current = false;
       const err = chrome.runtime.lastError;
       if (err) {
         // 白盒化：context invalidated（扩展被重载/更新）时停止轮询并明确提示，而非静默吞掉
@@ -73,22 +83,35 @@ export default function NetworkLog({ onCreateRule, observeEnabled, observeResour
         return;
       }
       if (res) setLogs(res);
+      // 在途期间又攒下了新的变更信号 → 收尾再拉一次，保证最终一致（仍走去抖，不会紧密连发）。
+      if (fetchQueuedRef.current) { fetchQueuedRef.current = false; scheduleFetch(); }
     });
+  };
+
+  // 去抖调度：窗口内多次 rev 变更合并为一次拉取，避免高流量下每事件全量重拉打满主线程。
+  const scheduleFetch = () => {
+    if (refreshTimerRef.current !== undefined) return;
+    refreshTimerRef.current = window.setTimeout(() => {
+      refreshTimerRef.current = undefined;
+      fetchLogs();
+    }, 350);
   };
 
   useEffect(() => {
     chrome.storage.local.get('showNetworkResourceType', (res) => setShowResourceType(res.showNetworkResourceType === true));
     fetchLogs();
     if (!scopeAutoRefresh) return;
-    // 事件驱动：后台写入 interceptLog 时才刷新，取代 2 秒轮询（关掉当前视图的自动刷新即冻结视图并停止监听）
+    // 事件驱动：后台写入日志后会递增 interceptLogRev（IndexedDB 无跨上下文变更事件，改用这个
+    // 极小的计数器作实时刷新信号，不再投递整个大数组）。收到变化即（去抖后）LOG_GET 拉取最新日志。
+    // 关掉当前视图的自动刷新即冻结视图并停止监听。
     const onChanged = (changes: { [key: string]: chrome.storage.StorageChange }, area: string) => {
-      if (area === 'local' && changes.interceptLog) {
-        const next = changes.interceptLog.newValue;
-        setLogs(Array.isArray(next) ? next : []);
-      }
+      if (area === 'local' && changes.interceptLogRev) scheduleFetch();
     };
     chrome.storage.onChanged.addListener(onChanged);
-    return () => chrome.storage.onChanged.removeListener(onChanged);
+    return () => {
+      chrome.storage.onChanged.removeListener(onChanged);
+      if (refreshTimerRef.current !== undefined) { window.clearTimeout(refreshTimerRef.current); refreshTimerRef.current = undefined; }
+    };
   }, [scopeAutoRefresh]);
 
   // 水合：挂载时从存储恢复各视图的自动刷新开关与冻结点（关闭弹窗前的选择得以延续）。

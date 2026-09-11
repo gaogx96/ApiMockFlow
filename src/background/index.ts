@@ -1,5 +1,10 @@
 // ===== ApiMockFlow Background Service Worker =====
+import { appendLog, getAllLogs, countLogs, clearAll, clearScope, migrateFromStorageOnce } from './logStore';
+
 console.log('[ApiMockFlow] Background worker started');
+
+// 一次性把旧的 chrome.storage.local['interceptLog'] 数组迁入 IndexedDB（见 logStore）。
+migrateFromStorageOnce().catch(() => {});
 
 function setIcon(enabled: boolean) {
   const path = enabled ? {
@@ -440,7 +445,6 @@ chrome.windows.onRemoved.addListener((closedId) => {
 let logWriteQueue: Promise<unknown> = Promise.resolve();
 let historyWriteQueue: Promise<unknown> = Promise.resolve();
 let observeWriteQueue: Promise<unknown> = Promise.resolve();
-const MAX_INTERCEPT_LOG_BYTES = 32 * 1024 * 1024;
 // 单条日志的序列化上限。内容脚本全站注入，任意页面都能伪造 APII_LOG → LOG_SAVE
 // 投递任意大字符串。合法拦截日志由 interceptor 侧按 LOG_BODY_LIMIT 截断，正常远小于此；
 // 超限者判定为滥用/异常，直接拒收，避免一条超大 entry 撑爆存储或拖垮每次写入的 stringify。
@@ -460,7 +464,7 @@ function sanitizeLogEntry(raw: any): any | null {
   const out: Record<string, any> = {};
   for (const k of LOG_ENTRY_KEYS) if (raw[k] !== undefined) out[k] = raw[k];
   // 单条体积上限：超限直接丢弃（合法日志远小于此）。这次 stringify 顺带把字节数缓存到 _bytes，
-  // 供写入裁剪复用，避免落盘时再对该条重复 stringify。
+  // 供 logStore 写入裁剪复用，避免落盘时再对该条重复 stringify。
   let size: number;
   try { size = JSON.stringify(out).length * 2; } catch { return null; }
   if (size > MAX_LOG_ENTRY_BYTES) return null;
@@ -468,28 +472,8 @@ function sanitizeLogEntry(raw: any): any | null {
   return out;
 }
 
-// 单条日志的序列化字节数缓存在内部字段 _bytes 上：避免每写一条日志都对全数组逐条 stringify
-// （观察模式下每个 fetch/XHR 都写一次，是写放大的主因）。新条目在构造/净化时已算过一次直接带上；
-// 旧条目（SW 重启后从存储读回、无缓存）按需补算一次并回填。
-function logEntryBytes(item: any): number {
-  if (typeof item._bytes === 'number') return item._bytes;
-  let b = 0;
-  try { b = JSON.stringify(item).length * 2; } catch { b = 0; }
-  item._bytes = b;
-  return b;
-}
-
-// 新日志插到队首并按「条数 200 + 总量 32MB」双上限裁剪。淘汰以「整条」为单位，绝不截断单条
-// 请求/响应 body——保证任一被保留的日志其请求与响应都完整可查。字节量走 _bytes 缓存，不再逐条重算。
-function unshiftCappedLog(logs: any[], entry: any): void {
-  logs.unshift(entry);
-  if (logs.length > 200) logs.length = 200;
-  let bytes = 0;
-  for (const item of logs) bytes += logEntryBytes(item);
-  while (logs.length && bytes > MAX_INTERCEPT_LOG_BYTES) bytes -= logEntryBytes(logs.pop());
-}
-
 // 与弹窗 isObservedLog 同口径：无 kind 字段的历史日志按「未命中规则」视为观察日志。
+// 条数/总量双上限裁剪与「整条淘汰、绝不截断单条 body」的语义已下沉到 logStore.appendLog。
 function isObservedLogEntry(log: any): boolean {
   return log.kind === 'observed' || (!log.kind && (!log.ruleIds || log.ruleIds.length === 0));
 }
@@ -526,11 +510,7 @@ chrome.webRequest.onCompleted.addListener((details) => {
       cancelled: false, delayed: false, delayMs: 0,
       kind: 'observed', resourceType,
     };
-    logWriteQueue = logWriteQueue.then(async () => {
-      const logs = await storageGet<any[]>('interceptLog', []);
-      unshiftCappedLog(logs, log);
-      await storageSet('interceptLog', logs);
-    });
+    logWriteQueue = logWriteQueue.then(() => appendLog(log));
   }).catch(() => {});
 // Do not restrict `types` here. Some Chrome versions reject an entire listener
 // registration when a newer webRequest type is unavailable, which silently left
@@ -841,29 +821,25 @@ chrome.runtime.onMessage.addListener((msg: any, _sender: any, sendResponse: any)
     if (!msg.payload) { return false; }
     const entry = sanitizeLogEntry(msg.payload);
     if (!entry) { sendResponse({ ok: false }); return false; }
-    // Serialize read-modify-write operations so near-simultaneous request/response
-    // logs cannot overwrite each other in chrome.storage.
-    logWriteQueue = logWriteQueue.then(async () => {
-      const log = await storageGet<any[]>('interceptLog', []);
-      unshiftCappedLog(log, entry);
-      await storageSet('interceptLog', log);
-    });
+    // 串行化各写操作，避免近同时的 请求/响应 日志相互覆盖。追加到 IndexedDB（logStore）。
+    logWriteQueue = logWriteQueue.then(() => appendLog(entry));
     logWriteQueue.then(() => sendResponse({ ok: true })).catch(() => sendResponse({ ok: false }));
     return true;
   }
-  if (t === 'LOG_GET') { storageGet<any[]>('interceptLog', []).then(sendResponse); return true; }
-  if (t === 'LOG_COUNT') { storageGet<any[]>('interceptLog', []).then(log => sendResponse(log.length)); return true; }
-  if (t === 'LOG_CLEAR') { storageSet('interceptLog', []).then(() => sendResponse({ success: true })); return true; }
+  if (t === 'LOG_GET') { getAllLogs().then(sendResponse); return true; }
+  if (t === 'LOG_COUNT') { countLogs().then((n) => sendResponse(n)); return true; }
+  if (t === 'LOG_CLEAR') {
+    logWriteQueue = logWriteQueue.then(() => clearAll());
+    logWriteQueue.then(() => sendResponse({ success: true })).catch(() => sendResponse({ success: false }));
+    return true;
+  }
   // 按视图隔离清空：只清本类（observed / rule），保留另一类。走 logWriteQueue 与 LOG_SAVE 串行化，
-  // 避免弹窗直读直写与后台写入交错导致刚拦截的日志被旧快照覆盖（静默丢日志）。
+  // 避免与后台写入交错导致刚拦截的日志被旧快照覆盖（静默丢日志）。
   if (t === 'LOG_CLEAR_SCOPE') {
     const scope = msg.payload?.scope === 'rule' ? 'rule' : 'observed';
-    logWriteQueue = logWriteQueue.then(async () => {
-      const log = await storageGet<any[]>('interceptLog', []);
-      const remaining = log.filter((item) => scope === 'observed' ? !isObservedLogEntry(item) : isObservedLogEntry(item));
-      await storageSet('interceptLog', remaining);
-      return remaining.length;
-    });
+    // keep：保留“另一类”。observed 视图清空 → 保留非 observed（规则日志），反之亦然。
+    const keep = (item: any) => scope === 'observed' ? !isObservedLogEntry(item) : isObservedLogEntry(item);
+    logWriteQueue = logWriteQueue.then(() => clearScope(keep));
     logWriteQueue.then((len) => sendResponse({ success: true, remaining: len })).catch(() => sendResponse({ success: false }));
     return true;
   }

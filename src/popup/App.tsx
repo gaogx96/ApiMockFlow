@@ -133,13 +133,11 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    // 徽标未读计数：无冻结时轻量轮询 LOG_COUNT（后台只回一个数字）。
-    // 不订阅 interceptLog 的 storage.onChanged —— 后台每拦截一条请求都会重写整个
-    // interceptLog（上限 200 条、含响应体，可达数 MB），onChanged 会把这个完整数组
-    // 结构化克隆投递给弹窗；高流量下每秒几十次直接喂爆主线程，导致点击延迟数秒、绘制被饿死。
-    // 弹窗生命周期很短，2s 轮询开销可忽略。
+    // 徽标未读计数：无冻结时轻量轮询 LOG_COUNT（后台只回一个数字，日志已迁 IndexedDB、count 走 meta）。
+    // 不按 interceptLogRev 事件驱动拉取 —— 高流量下 rev 每秒递增几十次，会把 LOG_COUNT 请求打成洪流；
+    // 徽标只需近似及时，2s 轮询足矣，且弹窗生命周期很短，开销可忽略。
     // 有视图被冻结时，角标须与冻结口径一致（否则「列表空、角标涨」），此时改读 LOG_GET 本地按冻结点计数；
-    // 仍是 2s 轮询、非 onChanged 洪流，且只在用户主动进入冻结态时才承担这次数组读取。
+    // 仍是 2s 轮询，且只在用户主动进入冻结态时才承担这次数组读取。
     let alive = true;
     const frozen = hasFrozenScope(logRefreshState);
     const pull = () => {
