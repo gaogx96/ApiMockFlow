@@ -40,6 +40,20 @@ function updateBadge(active: boolean, count: number, reqCount?: number) {
   }
 }
 
+// 扩展被停用/卸载/重载后，早先注入本页的这段内容脚本会成为「孤儿」：chrome.* 上下文失效、
+// storage.onChanged 不再触发，但页面上已画出的角标 DOM 无人清理——于是没切回去看过的背景标签页
+// 会一直显示旧的「ON | N rules」。extAlive() 是一次纯本地属性读取（不发消息、不读存储、不唤醒 SW，
+// 故不会重新引入 C2 已移除的轮询开销），据此在标签页重新可见时（正是用户切回来的那一刻）清掉孤儿角标。
+function extAlive(): boolean {
+  try { return !!(chrome.runtime && chrome.runtime.id); } catch (_) { return false; }
+}
+function killBadge() {
+  contextDead = true;
+  try { if (badge && badge.parentNode) badge.parentNode.removeChild(badge); } catch (_) { }
+  // 顺带通知主世界拦截器停用（它已支持 APII_SYNC；本文件不改动 interceptor 运行时层）
+  try { window.postMessage({ type: 'APII_SYNC', active: false, globalEnabled: false, rules: [], groups: [] }, '*'); } catch (_) { }
+}
+
 // Listen for messages from interceptor
 window.addEventListener('message', function (e) {
   if (e.source !== window || !e.data) return;
@@ -78,10 +92,7 @@ function syncAll() {
       var err = chrome.runtime.lastError;
       if (err) {
         if (err.message && err.message.indexOf('Extension context invalidated') >= 0) {
-          contextDead = true;
-          updateBadge(false, 0);
-          window.postMessage({ type: 'APII_SYNC', active: false, globalEnabled: false, rules: [], groups: [] }, '*');
-          // Extension context lost
+          killBadge(); // 扩展已失效：移除残留角标并通知拦截器停用
         }
         return;
       }
@@ -120,6 +131,15 @@ if (hasStorageApi) {
     }
   });
 }
+
+// 孤儿角标兜底清理：标签页重新可见时立即探测扩展是否已停用（覆盖「切回没看过的背景标签页」这一主场景，
+// 零后台开销）；另加一个自终止的低频探测覆盖前台停用的边角场景。二者都只做本地属性读取，不触碰 SW/存储。
+document.addEventListener('visibilitychange', function () {
+  if (!contextDead && document.visibilityState === 'visible' && !extAlive()) killBadge();
+});
+var orphanTimer = setInterval(function () {
+  if (contextDead || !extAlive()) { killBadge(); clearInterval(orphanTimer); }
+}, 5000);
 
 // Content script loaded
 } // end __apimockflow_loaded guard

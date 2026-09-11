@@ -44,6 +44,8 @@ export default function ApiTester({ onCreateRule, prefillRequest, prefillName, o
   const [importText, setImportText] = useState('');
   const [showImport, setShowImport] = useState(false);
   const [importedReqs, setImportedReqs] = useState<ApiRequest[]>([]);
+  // 导入结果列表高度（px）：null=按窗口/条数自适应默认值；用户拖拽 resize 后记住本次会话的选择。
+  const [importListHeight, setImportListHeight] = useState<number | null>(null);
   // 导入时的时间戳检测-确认：命中固定时间戳时，先让用户勾选是否转成动态占位符
   const [tsReview, setTsReview] = useState<{ req: ApiRequest; candidates: TsCandidate[]; selected: Set<string> } | null>(null);
   const [saveName, setSaveName] = useState('');
@@ -647,6 +649,7 @@ export default function ApiTester({ onCreateRule, prefillRequest, prefillName, o
       setImportText('');
       setShowImport(false);
     } else {
+      setImportListHeight(null); // 新一批导入结果，回到自适应默认高度
       setImportedReqs(result.requests);
     }
   }
@@ -1113,17 +1116,30 @@ export default function ApiTester({ onCreateRule, prefillRequest, prefillName, o
             </div>
           )}
           {importedReqs.length > 0 && (
-            <div className="bg-white dark:bg-slate-800 rounded border border-gray-200 dark:border-slate-700 max-h-24 overflow-y-auto">
-              <div className="flex items-center justify-between px-2 py-1 border-b border-gray-100 dark:border-slate-700 bg-gray-50 dark:bg-slate-900">
-                <span className="text-xs text-gray-500">解析出 {importedReqs.length} 个请求</span>
+            <div
+              className="bg-white dark:bg-slate-800 rounded border border-gray-200 dark:border-slate-700 flex flex-col resize-y overflow-hidden min-h-[92px]"
+              style={{
+                // 自适应：默认按条数撑高（每行 ~27px + 表头），封顶到视口可用高度；用户可拖拽下边缘 resize。
+                height: importListHeight ?? Math.min(
+                  typeof window === 'undefined' ? 360 : Math.max(120, window.innerHeight - 220),
+                  30 + importedReqs.length * 27 + 4,
+                ),
+                maxHeight: 'calc(100vh - 200px)',
+              }}
+              onMouseUp={(e) => setImportListHeight(e.currentTarget.offsetHeight)}
+            >
+              <div className="sticky top-0 z-10 flex items-center justify-between px-2 py-1 border-b border-gray-100 dark:border-slate-700 bg-gray-50 dark:bg-slate-900">
+                <span className="text-xs text-gray-500">解析出 {importedReqs.length} 个请求，点击逐条载入新标签</span>
               </div>
-              {importedReqs.map((r, i) => (
-                <div key={i} onClick={() => importOneToNewTab(r)}
-                  className="flex items-center gap-1.5 px-2 py-1 cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-800 dark:bg-slate-900 text-xs border-b border-gray-50 dark:border-slate-700 last:border-0">
-                  <span className={`method-badge method-${r.method}`} style={{ fontSize: 9 }}>{r.method}</span>
-                  <span className="text-gray-600 truncate flex-1">{r.url}</span>
-                </div>
-              ))}
+              <div className="flex-1 overflow-y-auto">
+                {importedReqs.map((r, i) => (
+                  <div key={i} onClick={() => importOneToNewTab(r)}
+                    className="flex items-center gap-1.5 px-2 py-1 cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-800 dark:bg-slate-900 text-xs border-b border-gray-50 dark:border-slate-700 last:border-0">
+                    <span className={`method-badge method-${r.method}`} style={{ fontSize: 9 }}>{r.method}</span>
+                    <span className="text-gray-600 truncate flex-1">{r.url}</span>
+                  </div>
+                ))}
+              </div>
             </div>
           )}
         </div>
