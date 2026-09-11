@@ -939,6 +939,18 @@ if (window.__APII_INIT) { /* already injected */ } else { window.__APII_INIT = t
     }
   }
 
+  // 测试钩子：仅当显式置位 window.__APII_TEST_HOOK 时，暴露纯匹配/改写函数供「漂移守卫」测试
+  // 在 node:vm 中与镜像 src/__tests__/engine.ts 逐条比对。浏览器运行时从不置位该标志，此分支零副作用。
+  if (window.__APII_TEST_HOOK) {
+    window.__APII_ENGINE = {
+      getMatchingRules: getMatchingRules,
+      applyReq: applyReq,
+      applyResp: applyResp,
+      detectSignHeaders: detectSignHeaders,
+      setState: function (rules, groups) { RULES = rules || []; GROUPS = groups || []; ACTIVE = true; GLOBAL_ENABLED = true; buildIndexes(); }
+    };
+  }
+
   // Receive state + rules from content script
   window.addEventListener('message', function (e) {
     if (e.source !== window || !e.data) return;

@@ -1,5 +1,13 @@
-import { describe, it, expect } from 'vitest';
-import { matchUrl, getMatchingRules, applyReq, applyResp, detectSignHeaders } from './engine';
+import { describe, it, expect, beforeEach } from 'vitest';
+import {
+  getMatchingRules,
+  applyReq,
+  applyResp,
+  detectSignHeaders,
+  syncRules,
+  setActive,
+  setGlobalEnabled,
+} from '../engine/engine';
 import { Rule, Action } from '../shared/types';
 
 // === Helper to create test rules ===
@@ -17,34 +25,50 @@ function makeAction(overrides: Partial<Action> = {}): Action {
   return { type: 'modifyResponseBody', operate: 'set', key: '', value: '', ...overrides };
 }
 
+// 引擎是模块级单例：每例前开启门控（getMatchingRules 依赖 ACTIVE && GLOBAL_ENABLED），
+// 需匹配的测试各自 syncRules 播种规则。applyReq/applyResp/detectSignHeaders 为纯函数，不依赖状态。
+beforeEach(() => {
+  setActive(true);
+  setGlobalEnabled(true);
+  syncRules([], []);
+});
+
 // ============================================================
-// TEST 1: matchUrl — normal flow with all 4 match types
+// TEST 1: 匹配的 4 种 matchType —— 经单规则 syncRules + getMatchingRules 验证
+// （P0-1 收敛：不再有独立的 matchUrl，单一 matcher 即目标；命中=返回该规则）
 // ============================================================
-describe('matchUrl', () => {
+describe('matchType（单一 matcher）', () => {
+  const groups = [{ id: 'default', enabled: true }];
+  // 播种一条给定 matchType 的规则，返回给定 url 是否命中
+  function hits(ruleUrl: string, matchType: Rule['match']['matchType'], url: string, method = 'GET', rtype = 'fetch'): boolean {
+    syncRules([makeRule({ id: 'm', match: { url: ruleUrl, matchType, method: '', resourceType: '' } })], groups);
+    return getMatchingRules(url, method, rtype).length > 0;
+  }
+
   it('exact: matches identical URLs, rejects different URLs', () => {
-    expect(matchUrl('https://a.com/api', 'exact', 'https://a.com/api')).toBe(true);
-    expect(matchUrl('https://a.com/api', 'exact', 'https://a.com/api/v2')).toBe(false);
-    expect(matchUrl('https://a.com/api', 'exact', 'https://b.com/api')).toBe(false);
+    expect(hits('https://a.com/api', 'exact', 'https://a.com/api')).toBe(true);
+    expect(hits('https://a.com/api', 'exact', 'https://a.com/api/v2')).toBe(false);
+    expect(hits('https://a.com/api', 'exact', 'https://b.com/api')).toBe(false);
   });
 
   it('contains: matches substring anywhere in URL', () => {
-    expect(matchUrl('/api/user', 'contains', 'https://a.com/api/user/123')).toBe(true);
-    expect(matchUrl('/api/user', 'contains', 'https://a.com/other')).toBe(false);
-    expect(matchUrl('', 'contains', 'https://a.com/anything')).toBe(true); // empty string always matches
+    expect(hits('/api/user', 'contains', 'https://a.com/api/user/123')).toBe(true);
+    expect(hits('/api/user', 'contains', 'https://a.com/other')).toBe(false);
+    expect(hits('', 'contains', 'https://a.com/anything')).toBe(true); // empty string always matches
   });
 
   it('regex: matches pattern, rejects non-matches, handles invalid regex gracefully', () => {
-    expect(matchUrl('/api/\\d+', 'regex', 'https://a.com/api/123')).toBe(true);
-    expect(matchUrl('/api/\\d+', 'regex', 'https://a.com/api/abc')).toBe(false);
-    // Invalid regex should not crash, just return false
-    expect(matchUrl('[invalid', 'regex', 'https://a.com/api')).toBe(false);
+    expect(hits('/api/\\d+', 'regex', 'https://a.com/api/123')).toBe(true);
+    expect(hits('/api/\\d+', 'regex', 'https://a.com/api/abc')).toBe(false);
+    // Invalid regex should not crash（safeRe 返回 null → 不入 _regexList → 不命中）
+    expect(hits('[invalid', 'regex', 'https://a.com/api')).toBe(false);
   });
 
   it('domain: matches exact domain and subdomains', () => {
-    expect(matchUrl('example.com', 'domain', 'https://example.com/path')).toBe(true);
-    expect(matchUrl('example.com', 'domain', 'https://api.example.com/path')).toBe(true);
-    expect(matchUrl('example.com', 'domain', 'https://notexample.com/path')).toBe(false);
-    expect(matchUrl('example.com', 'domain', 'https://other.com/path')).toBe(false);
+    expect(hits('example.com', 'domain', 'https://example.com/path')).toBe(true);
+    expect(hits('example.com', 'domain', 'https://api.example.com/path')).toBe(true);
+    expect(hits('example.com', 'domain', 'https://notexample.com/path')).toBe(false);
+    expect(hits('example.com', 'domain', 'https://other.com/path')).toBe(false);
   });
 });
 
@@ -55,37 +79,46 @@ describe('getMatchingRules', () => {
   const groups = [{ id: 'default', enabled: true }, { id: 'disabled', enabled: false }];
 
   it('returns only enabled rules in enabled groups', () => {
-    const rules = [
+    syncRules([
       makeRule({ id: 'r1', enabled: true, groupId: 'default' }),
       makeRule({ id: 'r2', enabled: false, groupId: 'default' }),
       makeRule({ id: 'r3', enabled: true, groupId: 'disabled' }),
-    ];
-    const result = getMatchingRules(rules, groups, 'https://a.com/api', 'GET', 'fetch');
+    ], groups);
+    const result = getMatchingRules('https://a.com/api', 'GET', 'fetch');
     expect(result).toHaveLength(1);
     expect(result[0].id).toBe('r1');
   });
 
   it('filters by HTTP method when specified', () => {
-    const rules = [
+    syncRules([
       makeRule({ id: 'r1', match: { url: '/api', matchType: 'contains', method: 'POST', resourceType: '' } }),
       makeRule({ id: 'r2', match: { url: '/api', matchType: 'contains', method: 'GET', resourceType: '' } }),
-    ];
-    const result = getMatchingRules(rules, groups, 'https://a.com/api', 'GET', 'fetch');
+    ], groups);
+    const result = getMatchingRules('https://a.com/api', 'GET', 'fetch');
     expect(result).toHaveLength(1);
     expect(result[0].id).toBe('r2');
   });
 
   it('ignores method filter when rule method is empty (matches all)', () => {
-    const rules = [
+    syncRules([
       makeRule({ id: 'r1', match: { url: '/api', matchType: 'contains', method: '', resourceType: '' } }),
-    ];
-    const result = getMatchingRules(rules, groups, 'https://a.com/api', 'DELETE', 'fetch');
+    ], groups);
+    const result = getMatchingRules('https://a.com/api', 'DELETE', 'fetch');
     expect(result).toHaveLength(1);
   });
 
   it('returns empty array when no rules match', () => {
-    const rules = [makeRule({ match: { url: '/other', matchType: 'exact', method: '', resourceType: '' } })];
-    expect(getMatchingRules(rules, groups, 'https://a.com/api', 'GET', 'fetch')).toHaveLength(0);
+    syncRules([makeRule({ match: { url: '/other', matchType: 'exact', method: '', resourceType: '' } })], groups);
+    expect(getMatchingRules('https://a.com/api', 'GET', 'fetch')).toHaveLength(0);
+  });
+
+  it('gated off when inactive or globally disabled', () => {
+    syncRules([makeRule({ id: 'r1' })], groups);
+    setActive(false);
+    expect(getMatchingRules('https://a.com/api', 'GET', 'fetch')).toHaveLength(0);
+    setActive(true);
+    setGlobalEnabled(false);
+    expect(getMatchingRules('https://a.com/api', 'GET', 'fetch')).toHaveLength(0);
   });
 });
 
@@ -231,10 +264,15 @@ describe('applyResp', () => {
 // TEST 5: Edge cases — empty inputs, malformed data, extreme values
 // ============================================================
 describe('edge cases', () => {
-  it('matchUrl with empty URL', () => {
-    expect(matchUrl('', 'contains', 'https://a.com')).toBe(true);
-    expect(matchUrl('', 'exact', '')).toBe(true);
-    expect(matchUrl('', 'regex', 'anything')).toBe(true); // empty regex matches everything
+  const defaultGroup = [{ id: 'default', enabled: true }];
+
+  it('matchType edge: empty rule url', () => {
+    syncRules([makeRule({ id: 'm', match: { url: '', matchType: 'contains', method: '', resourceType: '' } })], defaultGroup);
+    expect(getMatchingRules('https://a.com', 'GET', 'fetch').length).toBeGreaterThan(0);
+    syncRules([makeRule({ id: 'm', match: { url: '', matchType: 'exact', method: '', resourceType: '' } })], defaultGroup);
+    expect(getMatchingRules('', 'GET', 'fetch').length).toBeGreaterThan(0); // exact '' 命中空 URL
+    syncRules([makeRule({ id: 'm', match: { url: '', matchType: 'regex', method: '', resourceType: '' } })], defaultGroup);
+    expect(getMatchingRules('anything', 'GET', 'fetch').length).toBeGreaterThan(0); // 空正则匹配一切
   });
 
   it('applyReq with empty actions array returns unchanged request', () => {
@@ -261,12 +299,13 @@ describe('edge cases', () => {
   });
 
   it('getMatchingRules with empty rules array returns empty', () => {
-    expect(getMatchingRules([], [{ id: 'default', enabled: true }], 'https://a.com', 'GET', 'fetch')).toEqual([]);
+    syncRules([], [{ id: 'default', enabled: true }]);
+    expect(getMatchingRules('https://a.com', 'GET', 'fetch')).toEqual([]);
   });
 
   it('getMatchingRules with empty groups uses default group', () => {
-    const rules = [makeRule({ groupId: 'default' })];
-    const result = getMatchingRules(rules, [], 'https://a.com/api', 'GET', 'fetch');
+    syncRules([makeRule({ groupId: 'default' })], []);
+    const result = getMatchingRules('https://a.com/api', 'GET', 'fetch');
     expect(result).toHaveLength(1);
   });
 
