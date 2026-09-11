@@ -122,6 +122,15 @@ window.addEventListener('message', function handler(e) {
   }
 });
 
+// 声明式 world:MAIN 注入的握手兜底（配合 manifest 新增的第二条 world:MAIN content_script）：
+// world:MAIN 的 interceptor 与本 ISOLATED content 谁先执行由浏览器决定、不保证顺序。若 interceptor
+// 先跑，它「只发一次、且不重发」的 APII_READY 会早于上面的监听器注册而丢失 —— 规则永不下发、拦截静默
+// 失效。此时 interceptor 已注册好 APII_SYNC 监听，故本脚本启动即主动同步一次即可命中。
+// 反之若本脚本先跑，这次主动同步可能因 interceptor 尚未就绪而丢，但上面的 APII_READY→syncAll 会兜底。
+// 两条路径互补，覆盖任意执行顺序；syncAll 幂等（interceptor 每次 APII_SYNC 都重建规则索引），对既有
+// script-tag 注入路径也只是一次无害的冗余同步。
+syncAll();
+
 // Sync on storage changes (replaces polling — more efficient, no SW wake-ups)
 if (hasStorageApi) {
   chrome.storage.onChanged.addListener(function (changes, area) {

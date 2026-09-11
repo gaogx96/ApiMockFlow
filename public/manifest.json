@@ -13,6 +13,12 @@
       "matches": ["<all_urls>"],
       "js": ["content.js"],
       "run_at": "document_start"
+    },
+    {
+      "matches": ["<all_urls>"],
+      "js": ["interceptor.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
     }
   ],
   "action": {

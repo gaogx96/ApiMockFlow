@@ -28,6 +28,10 @@ function injectAllTabs() {
       setTimeout(() => {
         eligible.slice(i, i + BATCH).forEach(tab => {
           chrome.scripting.executeScript({ target: { tabId: tab.id! }, files: ['content.js'] }).catch(() => {});
+          // 严格 CSP 站点里 content.js 的 <script> 注入会被页面 CSP 拦掉，拦截器装不上。这里再用
+          // world:'MAIN'（executeScript 的 world 自 Chrome 95 起支持）直接把 interceptor.js 注入主世界，
+          // 绕过页面 CSP。interceptor 有 __APII_INIT 防重入守卫，与 content.js 的 script-tag 注入并存去重。
+          chrome.scripting.executeScript({ target: { tabId: tab.id! }, world: 'MAIN', files: ['interceptor.js'] }).catch(() => {});
         });
       }, Math.floor(i / BATCH) * 100);
     }
