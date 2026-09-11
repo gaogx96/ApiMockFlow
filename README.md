@@ -2,7 +2,7 @@
 
 Chrome 浏览器扩展 — API 请求拦截、Mock 数据注入、接口调试一体化工具。
 
-> 当前版本 **v1.7.0** · [下载最新 Release](https://github.com/gaogx96/ApiMockFlow/releases/latest)
+> 当前版本 **v1.8.0** · [下载最新 Release](https://github.com/gaogx96/ApiMockFlow/releases/latest)
 
 ---
 
@@ -122,6 +122,14 @@ src/
 ---
 
 ## 更新日志
+
+### v1.8.0
+- **拦截器改 `world:MAIN` 声明式注入**：兼容严格 CSP 站点；安装/重载后自动接管已开标签页（无需刷新），跨世界 `APII_TAKEOVER` 握手消除重载后 mock/日志失效
+- **拦截日志迁 IndexedDB + 分片**：单条 body 完整保留（10MB），投递上限 16MB、总量 32MB，消除逐条 re-stringify 开销
+- **API 测试器拆分 + 懒加载**：抽出纯函数/无状态组件到同级模块，`React.lazy` 拆出独立 chunk，弹窗首开更快
+- **新增 HAR 导入**：多 entries 走既有多请求导入流程
+- 认证头抓取默认不再全站监听；引擎收敛为单一 TS 源并加漂移守卫测试（199 用例）
+- 文档口径同步、injectScript 明示「以页面自身权限执行」
 
 ### v1.7.0
 - **石墨薄雾 UI 改版**：全新亮/暗双主题，一键切换；新增共享组件（Icon/Select/TabStrip/SearchBar/KeyValueEditor/Tooltip），弹窗改圆角浮卡布局
