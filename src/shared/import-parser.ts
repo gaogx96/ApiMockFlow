@@ -1,12 +1,17 @@
 import { ApiRequest, MultipartPart } from './api-types';
 
-export type ImportFormat = 'curl' | 'httpie' | 'openapi' | 'unknown';
+export type ImportFormat = 'curl' | 'httpie' | 'openapi' | 'har' | 'unknown';
 
 export function detectFormat(input: string): ImportFormat {
   const t = input.trim();
   if (/^curl\s/i.test(t)) return 'curl';
   if (/^(?:GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)\s+https?:\/\//i.test(t)) return 'httpie';
   if (/^https?\s+/i.test(t) && !/^https?:\/\//i.test(t)) return 'httpie';
+  // HAR：JSON 顶层含 log.entries。放在 openapi 启发式之前——HAR 里不会出现 "paths"/"responses"，
+  // 但先精确判定 log.entries 更稳妥、语义更明确。用廉价正则做前置守卫，避免对大段非 HAR 文本做 JSON.parse。
+  if (/"log"\s*:/.test(t) && /"entries"\s*:/.test(t)) {
+    try { const j = JSON.parse(t); if (j && j.log && Array.isArray(j.log.entries)) return 'har'; } catch { /* 非严格 JSON，落到后续启发式 */ }
+  }
   // 同时兼容 YAML（openapi: 3.x）与 JSON（"openapi": "3.x"）；
   // 注意不能用 \b"paths"——引号前不构成单词边界，会永远匹配失败。
   if (/openapi["']?\s*:\s*["']?3\./i.test(t) || (/"paths"\s*:/.test(t) && /"responses"\s*:/.test(t))) return 'openapi';
@@ -294,12 +299,74 @@ function generateExample(schema: any): any {
   }
 }
 
+// HAR（HTTP Archive）：DevTools/Charles/Fiddler 导出的抓包格式。遍历 log.entries[].request，
+// 每条 request 映射为一个 ApiRequest，N 条走现有多请求导入流程（每条开新 tab）。
+// JSON.parse 吞错返回 []（与 parseOpenAPI 同风格）。
+export function parseHar(input: string): ApiRequest[] {
+  let har: any;
+  try { har = JSON.parse(input); } catch { return []; }
+  const entries = har?.log?.entries;
+  if (!Array.isArray(entries)) return [];
+
+  const requests: ApiRequest[] = [];
+  for (const entry of entries) {
+    const r = entry?.request;
+    if (!r || typeof r !== 'object' || !r.url) continue;
+    const req: ApiRequest = {
+      method: String(r.method || 'GET').toUpperCase(),
+      url: String(r.url), // HAR url 已含完整 query，忽略 queryString[] 以免重复
+      headers: {},
+      bodyType: 'raw',
+    };
+    // headers[]（{name,value} 数组）折叠成 Record；跳过 HTTP/2 伪头（:method / :path / :authority / :scheme）。
+    if (Array.isArray(r.headers)) {
+      for (const h of r.headers) {
+        const name = h?.name;
+        if (typeof name !== 'string' || !name || name.startsWith(':')) continue;
+        req.headers[name] = String(h.value ?? '');
+      }
+    }
+    const pd = r.postData;
+    if (pd && typeof pd === 'object') {
+      const mime = String(pd.mimeType || '').toLowerCase();
+      const unsupported: string[] = [];
+      if (/multipart\/form-data/.test(mime) && Array.isArray(pd.params)) {
+        const parts: MultipartPart[] = pd.params.map((p: any) => {
+          const name = String(p?.name ?? '');
+          if (p?.fileName) unsupported.push(`文件字段 ${name}`);
+          return {
+            name,
+            value: String(p?.value ?? ''),
+            ...(p?.fileName ? { fileName: String(p.fileName) } : {}),
+            ...(p?.contentType ? { contentType: String(p.contentType) } : {}),
+          };
+        });
+        req.body = JSON.stringify(parts);
+        req.bodyType = 'multipart';
+      } else if (/x-www-form-urlencoded/.test(mime)) {
+        req.bodyType = 'urlencoded';
+        if (typeof pd.text === 'string' && pd.text) req.body = pd.text;
+        else if (Array.isArray(pd.params)) {
+          req.body = pd.params.map((p: any) => `${encodeURIComponent(String(p?.name ?? ''))}=${encodeURIComponent(String(p?.value ?? ''))}`).join('&');
+        }
+      } else if (typeof pd.text === 'string') {
+        req.body = pd.text;
+        req.bodyType = 'raw';
+      }
+      if (unsupported.length) req.unsupported = [`暂不支持导入 ${unsupported.join('、')}；请在 API Tester 中手动补充文件后发送。`];
+    }
+    requests.push(req);
+  }
+  return requests;
+}
+
 export function parseImport(input: string): { format: ImportFormat; requests: ApiRequest[] } {
   const format = detectFormat(input);
   switch (format) {
     case 'curl': return { format, requests: [parseCurl(input)] };
     case 'httpie': return { format, requests: [parseHttpie(input)] };
     case 'openapi': return { format, requests: parseOpenAPI(input) };
+    case 'har': return { format, requests: parseHar(input) };
     default: return { format: 'unknown', requests: [] };
   }
 }

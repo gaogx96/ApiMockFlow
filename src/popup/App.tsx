@@ -1,12 +1,14 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, lazy, Suspense } from 'react';
 import Icon from './components/Icon';
 import { AppState, Rule, RuleMatch, CreateRuleContext, InterceptedRequest } from '../shared/types';
 import { ApiRequest } from '../shared/api-types';
 import RuleList from './pages/RuleList';
 import RuleEditor from './pages/RuleEditor';
 import ErrorBoundary from './ErrorBoundary';
-import ApiTester from './pages/ApiTester';
-import NetworkLog from './pages/NetworkLog';
+// 两个重页懒加载：拆出独立 chunk（落 dist/chunks/），弹窗首包变小、首开更快。
+// MV3 CSP script-src 'self' 允许同源加载包内 chunk；interceptor 为独立 build，不受影响。
+const ApiTester = lazy(() => import('./pages/ApiTester'));
+const NetworkLog = lazy(() => import('./pages/NetworkLog'));
 import Tooltip from './components/Tooltip';
 import { showConfirm } from '../shared/toast';
 
@@ -293,6 +295,12 @@ export default function App() {
       {/* Main content */}
       <main className="flex-1 flex flex-col overflow-hidden" style={{ background: 'var(--surface)' }}>
         <ErrorBoundary key={page}>
+        <Suspense fallback={
+          <div className="flex flex-col items-center justify-center h-full gap-2" style={{ color: 'var(--text2)' }}>
+            <Icon name="refresh-cw" size={22} className="animate-spin" style={{ opacity: 0.7 }} />
+            <span className="text-xs opacity-70">加载中…</span>
+          </div>
+        }>
         {page === 'list' && (
           <RuleList state={state} onRefresh={refreshState} onEditRule={handleEditRule} />
         )}
@@ -316,6 +324,7 @@ export default function App() {
           setPage('editor');
         }} />}
         {page === 'networklog' && <NetworkLog onCreateRule={handleCreateRuleFromLog} onOpenRequest={handleOpenRequest} onReplay={handleReplay} onClear={() => setLogCount(0)} observeEnabled={state.observeEnabled === true} observeResourceTypes={state.observeResourceTypes || ['fetch', 'xmlhttprequest']} onObserveChange={handleObserveChange} />}
+        </Suspense>
         </ErrorBoundary>
       </main>
 
