@@ -1119,12 +1119,12 @@ export default function ApiTester({ onCreateRule, prefillRequest, prefillName, o
             <div
               className="bg-white dark:bg-slate-800 rounded border border-gray-200 dark:border-slate-700 flex flex-col resize-y overflow-hidden min-h-[92px]"
               style={{
-                // 自适应：默认按条数撑高（每行 ~27px + 表头），封顶到视口可用高度；用户可拖拽下边缘 resize。
-                height: importListHeight ?? Math.min(
-                  typeof window === 'undefined' ? 360 : Math.max(120, window.innerHeight - 220),
-                  30 + importedReqs.length * 27 + 4,
-                ),
-                maxHeight: 'calc(100vh - 200px)',
+                // 自适应窗口高度：默认按条数撑高（每行 ~27px + 表头），封顶到「窗口高度 − 其余固定区」
+                // （顶栏 / 底部导航 / URL 栏 / 导入输入区 / 子标签，合计约 340px），保证整列绝不溢出弹窗。
+                // 用户可拖拽下边缘微调；resize 同样受 maxHeight 约束，拖到底也不会超界（故 stale 值亦安全）。
+                // 独立窗口模式下 100vh = 整窗高度，随窗口变化自适应；弹窗模式 100vh≈580，算得约 240px。
+                height: importListHeight ?? `min(${30 + importedReqs.length * 27 + 4}px, calc(100vh - 340px))`,
+                maxHeight: 'calc(100vh - 340px)',
               }}
               onMouseUp={(e) => setImportListHeight(e.currentTarget.offsetHeight)}
             >
