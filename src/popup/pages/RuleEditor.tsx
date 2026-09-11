@@ -581,7 +581,7 @@ export default function RuleEditor({ rule, groups, onSave, onCancel, onBack, pre
                   )}
                   {action.type === 'injectScript' && (
                     <div className="text-xs text-amber-600 dark:text-amber-400 space-y-1">
-                      <p>警告：注入的脚本在页面上下文中执行，可访问页面所有数据。仅使用你信任的脚本。</p>
+                      <p>警告：注入的脚本将<strong>以页面自身权限在页面上下文中执行</strong>（非扩展沙箱），可访问页面所有数据与同源接口。仅使用你信任的脚本。</p>
                       <p>注意：避免死循环（while true）和超大计算量，否则页面将卡死需手动刷新。脚本执行超 2 秒可能阻塞页面。</p>
                       <p className="font-mono text-gray-500">ctx = {`{ url, headers, body, crypto }`} — 改 ctx.url / ctx.body / ctx.headers 即可影响请求</p>
                       <p className="font-mono text-gray-500">ctx.crypto: md5 / sha1 / sha256 / hmacSha1(key,msg) / hmacSha256(key,msg) / base64Encode / base64Decode</p>

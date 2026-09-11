@@ -30,7 +30,7 @@ Chrome 浏览器扩展 — API 请求拦截、Mock 数据注入、接口调试�
 
 **API 测试器**
 - 多 Tab 请求界面
-- cURL / HTTPie / OpenAPI 3.x 导入
+- cURL / HTTPie / OpenAPI 3.x / HAR 导入
 - 请求/响应体 JSON 格式化、自动修复与压缩
 - 响应体展示框随内容自适应高度
 - 响应智能诊断：401/403/404/429/5xx/超时/JSON 异常自动提示
@@ -44,7 +44,7 @@ Chrome 浏览器扩展 — API 请求拦截、Mock 数据注入、接口调试�
 - 独立窗口模式：完整界面可在独立浏览器窗口中打开（`?window=1`）
 - Toast 通知（替代 alert/confirm）
 - 页面 Badge 显示实时拦截数
-- 安装后自动注入已有标签页（无需刷新）
+- 安装后自动注入已有标签页（无需刷新）；拦截器经 manifest `world:MAIN` 声明式注入，兼容严格 CSP 站点
 
 ---
 
@@ -64,7 +64,7 @@ Chrome 浏览器扩展 — API 请求拦截、Mock 数据注入、接口调试�
 npm install          # 安装依赖
 npm run dev          # 开发模式
 npm run build        # 生产构建（esbuild 压缩，输出到 dist/）
-npm test             # 运行单测（vitest，119 个用例）
+npm test             # 运行单测（vitest，199 个用例）
 ```
 
 ---
@@ -98,12 +98,12 @@ src/
 ├── shared/
 │   ├── types.ts              # 类型定义
 │   ├── toast.ts              # Toast/Confirm 通知
-│   ├── import-parser.ts      # cURL/HTTPie/OpenAPI 解析
+│   ├── import-parser.ts      # cURL/HTTPie/OpenAPI/HAR 解析
 │   └── constants.ts          # 常量
 ├── __tests__/
 │   ├── engine.ts             # 匹配引擎（可测试模块）
 │   ├── engine.test.ts        # 引擎/规则匹配、injectScript 排序与签名告警单测
-│   ├── import-parser.test.ts # cURL/HTTPie/OpenAPI 解析单测
+│   ├── import-parser.test.ts # cURL/HTTPie/OpenAPI/HAR 解析单测
 │   ├── json-format.test.ts   # JSON 格式化/修复/压缩单测
 │   └── jwt.test.ts           # JWT 解析单测
 └── styles/global.css         # 全局样式 + 石墨薄雾 亮/暗双主题
@@ -116,7 +116,7 @@ src/
 - SSRF 防护：API 测试器拦截 IPv4/IPv6 私有地址
 - 安全 Header 保护：CSP、HSTS、Set-Cookie 等不可被规则移除
 - 导入校验：规则数量限制、字段校验、injectScript 自动剥离
-- 响应体截断：Mock 响应 2MB 上限，API 测试响应 100KB 截断
+- 响应体口径：拦截日志单条 body 完整保留（10MB 上限），单条日志投递上限 16MB、日志总量 32MB（超限从最旧整条淘汰，绝不截断单条 body）；API 测试响应展示 100KB 截断，已保存请求的响应持久化 2MB 上限（超限只存截断标记）
 - 生产构建：esbuild 压缩、sourcemap 关闭、console 已清理
 
 ---
