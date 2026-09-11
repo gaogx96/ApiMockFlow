@@ -102,7 +102,6 @@ export type MessageType =
   | 'TOGGLE_GROUP'
   | 'TOGGLE_GLOBAL'
   | 'GET_STATE'
-  | 'GET_MATCHING_RULES'
   | 'EXPORT_RULES'
   | 'IMPORT_RULES'
   | 'DELETE_RULE'
@@ -116,7 +115,8 @@ export type MessageType =
   | 'LOG_SAVE'
   | 'LOG_GET'
   | 'LOG_COUNT'
-  | 'LOG_CLEAR';
+  | 'LOG_CLEAR'
+  | 'LOG_CLEAR_SCOPE';
 
 export interface ExtensionMessage {
   type: MessageType;

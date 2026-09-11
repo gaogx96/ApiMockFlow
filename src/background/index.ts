@@ -407,35 +407,6 @@ function isBlockedHost(rawHost: string): boolean {
   return false;
 }
 
-// ===== Rule matching =====
-function matchRule(rule: Rule, url: string, method: string, rtype: string): boolean {
-  if (!rule.enabled) return false;
-  if (rule.match.method && rule.match.method !== method) return false;
-  if (rule.match.resourceType && rule.match.resourceType !== rtype) return false;
-  const ru = rule.match.url;
-  switch (rule.match.matchType) {
-    case 'exact': return url === ru;
-    case 'contains': return url.includes(ru);
-    case 'regex': try { return new RegExp(ru).test(url); } catch { return false; }
-    case 'domain': try { const u = new URL(url); return u.hostname === ru || u.hostname.endsWith('.' + ru); } catch { return false; }
-    default: return false;
-  }
-}
-
-async function getMatching(url: string, method: string, rtype: string): Promise<Rule[]> {
-  const ge = await storageGet<boolean>('globalEnabled', true);
-  if (!ge) return [];
-  const [rules, rawGroups] = await Promise.all([
-    storageGet<Rule[]>('rules', []),
-    storageGet<RuleGroup[]>('groups', [])
-  ]);
-  const groups = rawGroups.length === 0
-    ? [{ id: 'default', name: '默认分组', enabled: true, color: '#1677ff' }]
-    : rawGroups;
-  const eg = new Set(groups.filter(g => g.enabled).map(g => g.id));
-  return rules.filter(r => eg.has(r.groupId) && matchRule(r, url, method, rtype));
-}
-
 // ===== Detached panel window =====
 // 把整个 popup UI 弹成独立窗口，切换浏览器标签页不会关闭它。
 // 单例：已存在则聚焦，窗口 id 存 session（跨 SW 重启存活，浏览器关闭即清）。
@@ -488,9 +459,39 @@ function sanitizeLogEntry(raw: any): any | null {
   if (typeof raw.url !== 'string' || typeof raw.method !== 'string' || typeof raw.timestamp !== 'number') return null;
   const out: Record<string, any> = {};
   for (const k of LOG_ENTRY_KEYS) if (raw[k] !== undefined) out[k] = raw[k];
-  // 单条体积上限：超限直接丢弃（合法日志远小于此）
-  try { if (JSON.stringify(out).length * 2 > MAX_LOG_ENTRY_BYTES) return null; } catch { return null; }
+  // 单条体积上限：超限直接丢弃（合法日志远小于此）。这次 stringify 顺带把字节数缓存到 _bytes，
+  // 供写入裁剪复用，避免落盘时再对该条重复 stringify。
+  let size: number;
+  try { size = JSON.stringify(out).length * 2; } catch { return null; }
+  if (size > MAX_LOG_ENTRY_BYTES) return null;
+  out._bytes = size;
   return out;
+}
+
+// 单条日志的序列化字节数缓存在内部字段 _bytes 上：避免每写一条日志都对全数组逐条 stringify
+// （观察模式下每个 fetch/XHR 都写一次，是写放大的主因）。新条目在构造/净化时已算过一次直接带上；
+// 旧条目（SW 重启后从存储读回、无缓存）按需补算一次并回填。
+function logEntryBytes(item: any): number {
+  if (typeof item._bytes === 'number') return item._bytes;
+  let b = 0;
+  try { b = JSON.stringify(item).length * 2; } catch { b = 0; }
+  item._bytes = b;
+  return b;
+}
+
+// 新日志插到队首并按「条数 200 + 总量 32MB」双上限裁剪。淘汰以「整条」为单位，绝不截断单条
+// 请求/响应 body——保证任一被保留的日志其请求与响应都完整可查。字节量走 _bytes 缓存，不再逐条重算。
+function unshiftCappedLog(logs: any[], entry: any): void {
+  logs.unshift(entry);
+  if (logs.length > 200) logs.length = 200;
+  let bytes = 0;
+  for (const item of logs) bytes += logEntryBytes(item);
+  while (logs.length && bytes > MAX_INTERCEPT_LOG_BYTES) bytes -= logEntryBytes(logs.pop());
+}
+
+// 与弹窗 isObservedLog 同口径：无 kind 字段的历史日志按「未命中规则」视为观察日志。
+function isObservedLogEntry(log: any): boolean {
+  return log.kind === 'observed' || (!log.kind && (!log.ruleIds || log.ruleIds.length === 0));
 }
 
 const WEB_REQUEST_TYPE_MAP: Record<string, string> = {
@@ -527,11 +528,7 @@ chrome.webRequest.onCompleted.addListener((details) => {
     };
     logWriteQueue = logWriteQueue.then(async () => {
       const logs = await storageGet<any[]>('interceptLog', []);
-      logs.unshift(log);
-      if (logs.length > 200) logs.length = 200;
-      let bytes = 0;
-      for (const item of logs) bytes += JSON.stringify(item).length * 2;
-      while (logs.length && bytes > MAX_INTERCEPT_LOG_BYTES) bytes -= JSON.stringify(logs.pop()).length * 2;
+      unshiftCappedLog(logs, log);
       await storageSet('interceptLog', logs);
     });
   }).catch(() => {});
@@ -550,14 +547,6 @@ chrome.runtime.onMessage.addListener((msg: any, _sender: any, sendResponse: any)
     openPanelWindow()
       .then(() => sendResponse({ success: true }))
       .catch((err: any) => sendResponse({ success: false, error: err?.message || 'unknown' }));
-    return true;
-  }
-
-  if (t === 'GET_MATCHING_RULES') {
-    const { url = '', method = '', resourceType = '' } = msg.payload || {};
-    getMatching(url, method, resourceType).then(rules => {
-      sendResponse({ rules });
-    });
     return true;
   }
 
@@ -807,29 +796,6 @@ chrome.runtime.onMessage.addListener((msg: any, _sender: any, sendResponse: any)
     return true;
   }
 
-  // ---- API Tester: fetch current browser cookies for a URL ----
-  if (t === 'GET_BROWSER_COOKIES') {
-    const url = (msg.payload?.url || '') as string;
-    if (!url || !/^https?:\/\//i.test(url)) {
-      sendResponse({ error: '请先填写有效的 http(s) URL' });
-      return true;
-    }
-    try {
-      chrome.cookies.getAll({ url }, (cookies) => {
-        if (chrome.runtime.lastError) {
-          sendResponse({ error: chrome.runtime.lastError.message || '读取 Cookie 失败' });
-          return;
-        }
-        const list = cookies || [];
-        const cookieStr = list.map(c => `${c.name}=${c.value}`).join('; ');
-        sendResponse({ cookieStr, count: list.length });
-      });
-    } catch (err: unknown) {
-      sendResponse({ error: '读取 Cookie 异常: ' + ((err as Error)?.message || String(err)) });
-    }
-    return true;
-  }
-
   // ---- API Tester: fetch full login state (cookies + captured auth headers) ----
   if (t === 'GET_LOGIN_STATE') {
     const url = (msg.payload?.url || '') as string;
@@ -879,11 +845,7 @@ chrome.runtime.onMessage.addListener((msg: any, _sender: any, sendResponse: any)
     // logs cannot overwrite each other in chrome.storage.
     logWriteQueue = logWriteQueue.then(async () => {
       const log = await storageGet<any[]>('interceptLog', []);
-      log.unshift(entry);
-      if (log.length > 200) log.length = 200;
-      let bytes = 0;
-      for (const item of log) bytes += JSON.stringify(item).length * 2;
-      while (log.length && bytes > MAX_INTERCEPT_LOG_BYTES) bytes -= JSON.stringify(log.pop()).length * 2;
+      unshiftCappedLog(log, entry);
       await storageSet('interceptLog', log);
     });
     logWriteQueue.then(() => sendResponse({ ok: true })).catch(() => sendResponse({ ok: false }));
@@ -892,6 +854,19 @@ chrome.runtime.onMessage.addListener((msg: any, _sender: any, sendResponse: any)
   if (t === 'LOG_GET') { storageGet<any[]>('interceptLog', []).then(sendResponse); return true; }
   if (t === 'LOG_COUNT') { storageGet<any[]>('interceptLog', []).then(log => sendResponse(log.length)); return true; }
   if (t === 'LOG_CLEAR') { storageSet('interceptLog', []).then(() => sendResponse({ success: true })); return true; }
+  // 按视图隔离清空：只清本类（observed / rule），保留另一类。走 logWriteQueue 与 LOG_SAVE 串行化，
+  // 避免弹窗直读直写与后台写入交错导致刚拦截的日志被旧快照覆盖（静默丢日志）。
+  if (t === 'LOG_CLEAR_SCOPE') {
+    const scope = msg.payload?.scope === 'rule' ? 'rule' : 'observed';
+    logWriteQueue = logWriteQueue.then(async () => {
+      const log = await storageGet<any[]>('interceptLog', []);
+      const remaining = log.filter((item) => scope === 'observed' ? !isObservedLogEntry(item) : isObservedLogEntry(item));
+      await storageSet('interceptLog', remaining);
+      return remaining.length;
+    });
+    logWriteQueue.then((len) => sendResponse({ success: true, remaining: len })).catch(() => sendResponse({ success: false }));
+    return true;
+  }
   if (t === 'API_SAVED_SAVE') {
     storageGet<any[]>('savedRequests', []).then(list => {
       list.unshift(msg.payload);

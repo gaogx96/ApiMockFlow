@@ -117,28 +117,18 @@ export default function NetworkLog({ onCreateRule, observeEnabled, observeResour
   const clearLogs = async () => {
     const scopeLabel = logScope === 'observed' ? '观察' : '规则';
     if (!await showConfirm(`确定清空所有${scopeLabel}日志？`)) return;
-    // 按当前视图隔离清空：读全量 interceptLog，仅剔除本视图这一类、保留另一类后写回。
-    // 后台不在内存缓存该键（每次 LOG_SAVE/CLEAR 都是 storage 读改写），故弹窗端直读直写
-    // 是一致且安全的（与 savedRequests 同款），不新增后台消息、不改后台逻辑。
+    // 交后台 LOG_CLEAR_SCOPE 清空：与 LOG_SAVE 共用 logWriteQueue 串行化，避免弹窗直读直写
+    // 与后台写入交错、用旧快照覆盖刚拦截的日志（静默丢日志）。语义不变：只清本视图这一类、保留另一类。
     try {
-      const all = await new Promise<InterceptedRequest[]>((resolve) => {
-        chrome.storage.local.get('interceptLog', (res) =>
-          resolve(Array.isArray(res.interceptLog) ? res.interceptLog : []));
-      });
-      // 保留“另一类”：观察视图清空后留下规则日志，规则视图清空后留下观察日志。
-      const remaining = all.filter((log) => logScope === 'observed' ? !isObservedLog(log) : isObservedLog(log));
-      await new Promise<void>((resolve, reject) => {
-        chrome.storage.local.set({ interceptLog: remaining }, () => {
-          const err = chrome.runtime.lastError;
-          if (err) reject(err); else resolve();
-        });
-      });
-      setLogs(remaining);
+      const res = await chrome.runtime.sendMessage({ type: 'LOG_CLEAR_SCOPE', payload: { scope: logScope } });
+      if (!res || !res.success) throw new Error('clear failed');
+      // 立即把本视图这一类从当前 state 剔除（storage.onChanged 稍后也会回填、两者一致）。
+      setLogs((prev) => prev.filter((log) => logScope === 'observed' ? !isObservedLog(log) : isObservedLog(log)));
       // 关弹窗那一刻 overlay.remove() 会在原地补发 mouseenter，把被清掉的行的 URL 卡片重新点亮；
       // 与 setLogs 同批清空 tooltip，行随之卸载，残留卡片无处依附。
       setUrlTooltip(null);
       // 徽标计数按全量统计，仅在两类都清空后才归零；否则交给 App 的 2s 轮询自愈。
-      if (remaining.length === 0) onClear();
+      if ((res.remaining ?? 0) === 0) onClear();
     } catch (_) {
       showToast('清空失败：扩展上下文可能已失效，请重新打开面板', 'error');
     }
